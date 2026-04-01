@@ -1,0 +1,70 @@
+# ---------------------------------------------------
+# Project-Specific (from your directory)
+# ---------------------------------------------------
+
+# Editor settings (prevents sharing personal IDE configs)
+.vscode/
+
+# Build distributions (uploaded to PyPI, shouldn't be tracked)
+dist/
+
+# Local run/test outputs (assuming this holds generated data)
+output/
+
+# Examples
+Examples/
+
+# ---------------------------------------------------
+# Python Standard & Packaging
+# ---------------------------------------------------
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging artifacts
+build/
+*.egg-info/
+.eggs/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.env
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ---------------------------------------------------
+# Documentation (Sphinx)
+# ---------------------------------------------------
+docs/_build/
+docs/build/
+
+# ---------------------------------------------------
+# OS Generated Files
+# ---------------------------------------------------
+.DS_Store
+Thumbs.db

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glam-radiomics"  
+version = "1.0.8"
+authors = [
+  { name = "Yuri Velichko", email = "y-velichko@northwestern.edu" },
+]
+description = "Gray Level Affinity Metrics (GLAM) for quantitative medical image analysis."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "SimpleITK",
+    "scikit-learn",
+    "scikit-image",  # Added: Required for 'skimage.measure' (Marching Cubes)
+    "configparser",
+    "tqdm"           # Added: You are using tqdm in mapping.py for the progress bar
+]
+
+[project.urls]
+Homepage = "https://github.com/yv123456/GLAM" # <-- (Optional) Link to your Git repo
+Issues = "https://github.com/yv123456/GLAM/issues"
+
+[project.scripts]
+glam-run = "glam_radiomics.run:main"
