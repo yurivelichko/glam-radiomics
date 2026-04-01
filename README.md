@@ -30,10 +30,9 @@ A typical configuration file is structured as follows:
 # Note: configparser keys are case-insensitive, but values preserve case.
 
 [System]
-# Number of parallel processes to run. NumWorkers < Number of CPU Cores.
-# Use 1 for no parallelism.
-# Use 4, 8, etc. based on your CPU.
-NumWorkers = 8
+# Number of parallel processes to run. NumWorkers ~ 2 * Number of CPU Cores.
+# Use 1 for no parallelism. Use 4, 8, etc. based on your CPU.
+NumWorkers = 16
 
 [GLAM_Settings]
 MaxRdfRadius = 100
