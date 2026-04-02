@@ -10,6 +10,7 @@ You can install GLAM-radiomics using the following command:
 ```Plaintext
 pip install glam-radiomics
 ```
+Note: This release (v1.0.8) was successfully built and tested using Python 3.14.3 and NumPy 2.3.2.
 
 ### Key Dependencies
 When you install GLAM, the following core libraries are automatically integrated:
