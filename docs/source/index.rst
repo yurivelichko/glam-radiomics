@@ -2,7 +2,6 @@
 
 GLAM Radiomics Documentation
 ============================
-
 Welcome to the official documentation for the **Gray-Level Affinity Metrics (GLAM)** framework. 
 
 Use the Table of Contents below or in the sidebar to navigate through the theoretical foundations, installation instructions, and API reference.

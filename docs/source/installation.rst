@@ -1,6 +1,5 @@
 Installation
 ============
-
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
 Prerequisites
@@ -8,7 +7,7 @@ Prerequisites
 
 Before installing GLAM, ensure you have the following requirements:
 
-* **Python**: Version 3.8 or higher.
+* **Python**: Version 3.10 or higher.
 * **Pip**: The Python package installer.
 * **Virtual Environment**: It is highly recommended to use a virtual environment (e.g., ``venv`` or ``conda``) to avoid dependency conflicts.
 
@@ -19,10 +18,10 @@ Currently, the GLAM library is hosted on TestPyPI. You can install it using the 
 
 .. code-block:: bash
 
-    pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ glam-radiomics
+    pip install glam-radiomics
 
 .. note::
-   The ``--extra-index-url`` flag is necessary to ensure that standard dependencies (like NumPy, SciPy, and SimpleITK) are pulled from the main PyPI repository.
+   Make sure you have activated your virtual environment before running this command!
 
 Key Dependencies
 ----------------
@@ -33,7 +32,6 @@ When you install GLAM, the following core libraries are automatically integrated
 * **SimpleITK**: Handles the loading and normalization of 3D medical imaging formats like NIfTI (.nii.gz).
 * **Pandas**: Manages the structured output of multiscale Radial Distribution Functions and feature aggregation.
 * **Scikit-image & Scikit-learn**: Powers the morphological marching cubes (surface area), K-Means clustering, and advanced geometric descriptors.
-
 
 
 Verifying the Installation

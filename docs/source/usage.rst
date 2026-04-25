@@ -1,6 +1,5 @@
 Usage Guide
 ===========
-
 This guide demonstrates how to perform a multi-parametric radiomic analysis using the GLAM library. The framework relies on a centralized configuration file to manage the complex physics and radiomics parameters.
 
 Configuration (``config.ini``)

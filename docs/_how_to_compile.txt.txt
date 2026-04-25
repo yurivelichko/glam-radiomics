@@ -1,5 +1,0 @@
-cd /d C:\Users\yve626\OneDrive - Northwestern University\Research\GLAM\GLAM-Project 1.0\docs
-
-sphinx-apidoc -o source/ ../src/glam_radiomics
-
-.\make.bat html

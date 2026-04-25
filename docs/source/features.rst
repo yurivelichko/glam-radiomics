@@ -1,6 +1,5 @@
 GLAM Feature Dictionary
 =======================
-
 The GLAM framework provides a fully standalone, standardized feature extraction pipeline that translates complex spatial patterns into quantitative biomarkers. It operates independently of external radiomics packages, offering a highly optimized native 3D extraction engine.
 
 Features are organized into four primary domains: **Standard Radiomics**, **Statistical Mechanics & Thermodynamics**, **Soft Matter Physics**, and **Geometric & Topological Metrics**.

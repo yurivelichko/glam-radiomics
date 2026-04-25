@@ -1,5 +1,6 @@
 Home
 ====
+
 Theoretical Foundation
 ----------------------
 While modern pathology has advanced toward characterizing tissue architecture through rigorous principles of spatial coupling, conventional radiomics often lacks a parallel framework to capture these fundamental thermodynamic states. 
