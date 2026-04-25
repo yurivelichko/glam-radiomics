@@ -31,13 +31,8 @@ dependencies = [
 ]
 
 [project.urls]
-<<<<<<< HEAD
-Homepage = "https://github.com/yurivelichko/glam-radiomics" # <-- (Optional) Link to your Git repo
+Homepage = "https://github.com/yurivelichko/glam-radiomics"
 Issues = "https://github.com/yurivelichko/glam-radiomics/issues"
-=======
-Homepage = "https://https://github.com/yurivelichko/glam-radiomics" # <-- (Optional) Link to your Git repo
-Issues = "https://https://github.com/yurivelichko/glam-radiomics/issues"
->>>>>>> 859f3ade0c1fbfb55be2f9edc933d71a0234ff86
 
 [project.scripts]
 glam-run = "glam_radiomics.run:main"
