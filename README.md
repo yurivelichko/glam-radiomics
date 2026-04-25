@@ -4,12 +4,17 @@ This project introduces and implements a novel class of quantitative imaging fea
 
 The GLAM framework is written in Python and leverages high-performance libraries for medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
-##Installing from GitHub
+## Installing from GitHub
 
 You can install GLAM-radiomics using the following command:
 ```Plaintext
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ glam-radiomics
+```
+or
+```Plaintext
 pip install glam-radiomics
 ```
+Note: This release (v1.0.8) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
 
 ### Key Dependencies
 When you install GLAM, the following core libraries are automatically integrated:
@@ -30,10 +35,9 @@ A typical configuration file is structured as follows:
 # Note: configparser keys are case-insensitive, but values preserve case.
 
 [System]
-# Number of parallel processes to run. NumWorkers < Number of CPU Cores.
-# Use 1 for no parallelism.
-# Use 4, 8, etc. based on your CPU.
-NumWorkers = 8
+# Number of parallel processes to run. NumWorkers ~ 2 * Number of CPU Cores.
+# Use 1 for no parallelism. Use 4, 8, etc. based on your CPU.
+NumWorkers = 16
 
 [GLAM_Settings]
 MaxRdfRadius = 100
