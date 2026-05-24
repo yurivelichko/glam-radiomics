@@ -1,4 +1,4 @@
-# GRAY LEVEL AFFINITY METRICS (GLAM) [![Documentation Status](https://readthedocs.org/projects/glam-radiomics/badge/?version=latest)](https://glam-radiomics.readthedocs.io/en/latest/index.html)
+# GRAY LEVEL AFFINITY METRICS - GLAM RADIOMICS [![Documentation Status](https://readthedocs.org/projects/glam-radiomics/badge/?version=latest)](https://glam-radiomics.readthedocs.io/en/latest/index.html)
 
 This project introduces and implements a novel class of quantitative imaging features, termed Gray Level Affinity Metrics (GLAM), derived from the foundational principles of statistical mechanics. By treating image voxels as interacting particles within a multi-component system, the GLAM framework provides a set of physically interpretable metrics that characterize the spatial organization and texture of 3D medical images.
 
