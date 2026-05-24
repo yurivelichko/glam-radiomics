@@ -36,7 +36,7 @@ from .core import (
     calculate_glam_potential_energy,
     calculate_glam_pressure_virial,
     calculate_glam_shape_matrices,
-    calculate_effective_temperature,
+    calculate_configurational_disorder_index,
     calculate_nematic_order_parameter,
     calculate_nematic_order_per_gray_level,
     calculate_local_nematic_alignment,
@@ -193,7 +193,7 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
         **calculate_glam_topology(structured_glam_image, num_levels),
         **calculate_glam_potential_energy(rdf_structured_df, num_levels),
         **calculate_glam_pressure_virial(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
-        **calculate_effective_temperature(rdf_structured_df, rdf_random_df, num_levels),
+        **calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels),
         **calculate_glam_shape_matrices(structured_glam_image, num_levels, spacing),
         **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels),
         **calculate_js_divergence_matrix(rdf_structured_df, num_levels),
@@ -278,7 +278,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "Anisotropy": ("GLAM_Anisotropy_", None),
         "PotentialEnergy": ("GLAM_PotentialEnergy_", None),
         "PressureVirial": ("GLAM_PressureVirial_", None),
-        "EffectiveTemp": ("GLAM_EffectiveTemp_", None),
+        # "EffectiveTemp": ("GLAM_EffectiveTemp_", None),
+        "ConfigurationalDisorderIndex": ("GLAM_ConfigurationalDisorderIndex_", None),
         "Wasserstein": ("GLAM_Wasserstein_", None),
         "JSDivergence": ("GLAM_JSDivergence_", None), 
         "CumulativeJSDivergence": ("GLAM_CumulativeJSDivergence_", None),
@@ -343,7 +344,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     glam_matrices.update(rdf_shape_matrices)
 
     # --- Transformations (Symlog & Ln) ---
-    symlog_targets = ['PressureVirial', 'EffectiveTemp', 'B2', 'PotentialEnergy', 
+    symlog_targets = ['PressureVirial', 'ConfigurationalDisorderIndex', 'B2', 'PotentialEnergy', 
                       'RDF_Kurtosis', 'RDF_Skewness', 'Euler']
     
     for name in symlog_targets:
@@ -397,7 +398,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         'Betti0_Ln', 'Betti1_Ln', 'Betti2_Ln', 'Euler_Symlog', 
         'FractalDimension', 'Lacunarity_Ln', 'MultifractalWidth', 'MultifractalAlpha0', 'MultifractalD2',
         'CorrLength', 'Anisotropy', 
-        'PotentialEnergy_Symlog', 'CoordNum_Ln', 'EffectiveTemp_Symlog', 'PressureVirial_Symlog',   
+        'PotentialEnergy_Symlog', 'CoordNum_Ln', 'ConfigurationalDisorderIndex_Symlog', 'PressureVirial_Symlog',   
         'Shape_CentroidDist_Ln', 'Shape_InterfaceArea_Ln'
     ]
     

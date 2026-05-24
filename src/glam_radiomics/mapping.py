@@ -13,7 +13,7 @@ from .core import (
     calculate_glam_coordination_number,
     calculate_glam_potential_energy,
     calculate_glam_pressure_virial,
-    calculate_effective_temperature,
+    calculate_configurational_disorder_index,
     calculate_glam_compressibility,
     calculate_rdf_shape_matrices,
     calculate_glam_fractal_dimension,
@@ -120,7 +120,8 @@ def _process_single_voxel_worker(coords_z_y_x):
         need_potential = "Potential" in req_str
         need_pressure = "Pressure" in req_str
         need_compress = "Compress" in req_str
-        need_temp = "Temp" in req_str or "Effective" in req_str
+        # need_temp = "Temp" in req_str or "Effective" in req_str
+        need_config_disorder = "ConfigurationalDisorderIndex" in req_str or "ConfigDisorder" in req_str
         need_fractal = "Fractal" in req_str
         
         D, H, W = worker_mask_array.shape
@@ -242,10 +243,10 @@ def _process_single_voxel_worker(coords_z_y_x):
         shape_matrices = calculate_rdf_shape_matrices(local_rdf_df, num_gray_levels)
         local_matrices.update(shape_matrices)
 
-        if need_temp:
-             features_eff_temp = calculate_effective_temperature(local_rdf_df, local_random_proxy, num_gray_levels)
-             local_matrices["EffectiveTemp"] = reformat_dict_to_matrix(features_eff_temp, num_gray_levels, "GLAM_EffectiveTemp_", None)
-
+        if need_config_disorder:
+             features_config_disorder = calculate_configurational_disorder_index(local_rdf_df, local_random_proxy, num_gray_levels)
+             local_matrices["ConfigurationalDisorderIndex"] = reformat_dict_to_matrix(features_config_disorder, num_gray_levels, "GLAM_ConfigurationalDisorderIndex_", None)
+        
         if need_coord:
             features_coordnum = calculate_glam_coordination_number(local_rdf_df, num_gray_levels, local_level_counts, local_total_voxels)
             local_matrices["CoordNum"] = reformat_dict_to_matrix(features_coordnum, num_gray_levels, "GLAM_CoordNum_", None)
