@@ -115,20 +115,21 @@ Derived from the virial equation of state, this quantifies the mean internal for
 * **Interpretation**: This metric asks, *"What is the net mechanical 'push or pull' (internal stress) exerted between different voxel populations due to their spatial packing?"*
 * **Advantage**: It links spatial statistics directly to mechanical properties, offering a non-invasive computational proxy for the internal mechanical stresses within the tumor microenvironment.
 
-Effective Structural Temperature (:math:`T_{eff}`)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To complement metrics of energetic stability, the Effective Structural Temperature (:math:`T_{eff}`) characterizes textural disorder. Whereas PMF energy assesses how stable the structure is, :math:`T_{eff}` quantifies how dynamically disordered it is. :math:`T_{eff}` is derived by comparing the measured RDF of the actual image, :math:`g_{structured}(r)`, to that of its randomized counterpart, :math:`g_{randomized}(r)`. 
+Configurational Disorder Index (:math:`CDI`)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+To complement metrics of energetic stability, the Configurational Disorder Index (:math:`CDI`) characterizes textural disorder. Whereas PMF energy assesses how stable the structure is, the :math:`CDI` quantifies how dynamically disordered it is. The :math:`CDI` is derived by comparing the measured RDF of the actual image, :math:`g_{structured}(r)`, to that of its randomized counterpart, :math:`g_{randomized}(r)`. 
 
-The Boltzmann relation links the probability of a configuration to its energy and temperature. Because :math:`\ln(g(r))` is proportional to the negative potential divided by the temperature, deviations from randomness reflect an underlying "ordering potential." The observed structure, :math:`\ln(g_{structured}(r))`, represents this potential modulated by thermal-like disorder. The ratio between the structured and randomized forms yields a distance-dependent effective temperature:
+Drawing from the Boltzmann relation, which links the probability of a configuration to its energy and relative disorder, deviations from randomness reflect an underlying "ordering potential." Because :math:`\ln(g(r))` is proportional to the negative potential divided by this disorder parameter, the observed structure, :math:`\ln(g_{structured}(r))`, represents this potential modulated by the tissue's inherent architectural chaos. The ratio between the structured and randomized forms yields a distance-dependent disorder profile:
 
 .. math::
 
-   T(r) = \frac{\ln(g_{structured}(r))}{\ln(g_{structured}(r)) - \ln(g_{randomized}(r))}
+   CDI(r) = \frac{\ln(g_{structured}(r))}{\ln(g_{structured}(r)) - \ln(g_{randomized}(r))}
 
-Averaging :math:`T(r)` within the first coordination shell yields a stable, physically interpretable estimate of the local structural temperature :math:`T_{eff}(\alpha,\beta)`. High :math:`T_{eff}(\alpha,\beta)` indicates greater structural "noise," while low :math:`T_{eff}` means rigid or cold ordering. Comparing diagonal versus off-diagonal :math:`T_{eff}(\alpha,\beta)` elements distinguishes self-organized tissue components from dynamically heterogeneous interfaces. 
+Averaging :math:`CDI(r)` within the first coordination shell yields a stable, physically interpretable estimate of the local structural disorder, :math:`CDI(\alpha,\beta)`. A high :math:`CDI(\alpha,\beta)` indicates greater structural "noise" or heterogeneity, while a low :math:`CDI` indicates rigid or highly structured ordering. Comparing diagonal versus off-diagonal :math:`CDI(\alpha,\beta)` elements distinguishes self-organized tissue components from dynamically disordered interfaces. 
 
-* **Interpretation**: This metric asks, *"How much structural 'noise' or 'thermal agitation' exists in this tissue compared to a perfectly ordered state?"*
-* **Advantage**: It provides a clear indicator of architectural chaos; "hot" tissues are disorganized and random, while "cold" tissues are rigidly structured. This thermodynamic interpretation provides a robust, physically interpretable measure of local structural temperature in medical images.
+* **Interpretation**: This metric asks, *"How much structural 'noise' or configurational disorder exists in this tissue compared to a perfectly ordered state?"*
+* **Advantage**: It provides a clear indicator of architectural chaos; highly disordered tissues appear random and heterogeneous, while low-disorder tissues are rigidly structured. This thermodynamic-inspired approach provides a robust, physically interpretable measure of local architectural complexity in medical images.
+
 
 1-Wasserstein Distance (Assembly Cost)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
