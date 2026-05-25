@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glam-radiomics"  
-version = "1.0.8"
+version = "1.0.9"
 authors = [
   { name = "Yuri Velichko", email = "y-velichko@northwestern.edu" },
 ]
@@ -13,7 +13,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: GPL-3.0 license",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Topic :: Scientific/Engineering :: Image Processing",
