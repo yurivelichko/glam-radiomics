@@ -120,7 +120,6 @@ def _process_single_voxel_worker(coords_z_y_x):
         need_potential = "Potential" in req_str
         need_pressure = "Pressure" in req_str
         need_compress = "Compress" in req_str
-        # need_temp = "Temp" in req_str or "Effective" in req_str
         need_config_disorder = "ConfigurationalDisorderIndex" in req_str or "ConfigDisorder" in req_str
         need_fractal = "Fractal" in req_str
         

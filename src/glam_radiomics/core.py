@@ -1299,82 +1299,6 @@ def calculate_glam_pressure_virial(rdf_df, num_levels, level_counts, total_roi_v
                 
     return pressure_virials
 
-def calculate_effective_temperature(rdf_structured_df, rdf_random_df, num_levels):
-    """Calculates the Effective Structural Temperature averaged over the first coordination shell."""
-    # --- Get config params ---
-    savgol_window = get_config('SavgolWindow')
-    savgol_poly = get_config('SavgolPoly')
-    peak_prominence = get_config('PeakProminence')
-    # ---
-
-    effective_temps = {}
-    if rdf_structured_df.empty or rdf_random_df.empty: return effective_temps
-    r = rdf_structured_df['r'].values
-    
-    for alpha in range(num_levels):
-        for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
-            temp_key = f'GLAM_EffectiveTemp_{alpha}_{beta}'
-            
-            if key not in rdf_structured_df.columns or key not in rdf_random_df.columns:
-                effective_temps[temp_key] = np.nan
-                continue
-
-            g_struct_raw, g_rand_raw = rdf_structured_df[key].values, rdf_random_df[key].values
-            
-            if len(g_struct_raw) > savgol_window:
-                g_struct = savgol_filter(g_struct_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-                g_rand = savgol_filter(g_rand_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-            else:
-                g_struct, g_rand = g_struct_raw, g_rand_raw
-
-            try:
-                peaks, _ = find_peaks(g_struct, prominence=peak_prominence)
-                
-                if len(peaks) == 0:
-                    search_r = min(len(g_struct), 15) 
-                    if search_r == 0: raise ValueError("Not enough data")
-                    first_peak_idx = np.argmax(g_struct[:search_r])
-                    if first_peak_idx == 0: raise ValueError("Peak at r=1, no clear shell")
-                else:
-                    first_peak_idx = peaks[0] 
-
-                minima, _ = find_peaks(-g_struct[first_peak_idx:])
-                
-                if len(minima) == 0:
-                    r_min_idx = min(first_peak_idx * 2, len(r) - 1)
-                    if r_min_idx <= first_peak_idx: r_min_idx = len(r) - 1
-                else:
-                    r_min_idx = first_peak_idx + minima[0] 
-
-                if r_min_idx == 0: r_min_idx = 1 
-
-                g_s_shell = g_struct[:r_min_idx]
-                g_r_shell = g_rand[:r_min_idx]
-
-                g_s_shell[g_s_shell <= 1e-9] = 1e-9
-                g_r_shell[g_r_shell <= 1e-9] = 1e-9
-                
-                log_g_struct = np.log(g_s_shell)
-                log_g_rand = np.log(g_r_shell)
-                
-                log_diff = log_g_struct - log_g_rand
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    t_eff_r = log_g_struct / log_diff
-                
-                finite_t_eff = t_eff_r[np.isfinite(t_eff_r)]
-                
-                if finite_t_eff.size > 0:
-                    effective_temps[temp_key] = np.mean(finite_t_eff)
-                else:
-                    effective_temps[temp_key] = np.nan
-                    
-            except Exception as e:
-                effective_temps[temp_key] = np.nan
-                
-    return effective_temps
-
 def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels):
     """Calculates the Configurational Disorder Index (formerly Effective Structural Temperature)
        averaged over the first coordination shell."""
@@ -1438,12 +1362,12 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
                 log_diff = log_g_struct - log_g_rand
 
                 with np.errstate(divide='ignore', invalid='ignore'):
-                    t_eff_r = log_g_struct / log_diff
+                    disorder_idx = log_g_struct / log_diff
                 
-                finite_t_eff = t_eff_r[np.isfinite(t_eff_r)]
+                finite_disorder_idx = disorder_idx[np.isfinite(disorder_idx)]
                 
-                if finite_t_eff.size > 0:
-                    config_disorder_indices[index_key] = np.mean(finite_t_eff)
+                if finite_disorder_idx.size > 0:
+                    config_disorder_indices[index_key] = np.mean(finite_disorder_idx)
                 else:
                     config_disorder_indices[index_key] = np.nan
                     
