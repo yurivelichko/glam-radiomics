@@ -15,14 +15,8 @@ Installing from TestPyPI
 You can install GLAM-radiomics using the following command:
 
 .. code-block:: bash
-    
+
     pip install glam-radiomics
-
-or
-
-.. code-block:: bash
-
-    pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ glam_radiomics
 
 .. note::
    This release (v1.1.0) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2. Make sure you have activated your virtual environment before running this command!
