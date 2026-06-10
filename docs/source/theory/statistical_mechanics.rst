@@ -97,23 +97,23 @@ In the GLAM framework, this metric quantifies the "sponginess" or susceptibility
 * **Interpretation**: This metric asks, *"How 'spongy' or susceptible to density fluctuations is the tissue architecture?"*
 * **Advantage**: It captures large-scale structural heterogeneity. Low compressibility indicates rigid, tightly packed regions (like dense stroma), while high compressibility flags loose, highly variable clustering.
 
-Pressure Virial
-~~~~~~~~~~~~~~~
-Derived from the virial equation of state, this quantifies the mean internal force between voxel populations, capturing the mechanical response within the texture[cite: 92, 93].
+Structural Pressure Index (:math:`SPI`)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Broadly analogous to the virial equation of state, the Structural Pressure Index (SPI) utilizes a PMF-derived potential of mean force, :math:`W(r)`, to serve as a pressure-like structural descriptor. It quantifies the mean pseudomechanical force between voxel populations, capturing the spatial packing and mechanical-like response within the texture.
 
 .. math::
 
-   P_{\alpha,\beta} = -\frac{\rho_\alpha \rho_\beta}{6} \int_{0}^{R_{max}} r \frac{dW_{\alpha\beta}(r)}{dr} g_{\alpha\beta}(r) 4\pi r^2 dr
+   SPI_{\alpha,\beta} = -\frac{\rho_\alpha \rho_\beta}{6} \int_{0}^{R_{max}} r \frac{dW_{\alpha\beta}(r)}{dr} g_{\alpha\beta}(r) 4\pi r^2 dr
 
 .. figure:: /_static/GLAM_PressVirial.png
    :width: 700px
    :align: center
-   :alt: Second Virial Coefficient 
+   :alt: Structural Pressure Index Matrix
+   
+   **Figure:** Structural Pressure Index matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
-   **Figure:** Pressure Virial matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
-
-* **Interpretation**: This metric asks, *"What is the net mechanical 'push or pull' (internal stress) exerted between different voxel populations due to their spatial packing?"*
-* **Advantage**: It links spatial statistics directly to mechanical properties, offering a non-invasive computational proxy for the internal mechanical stresses within the tumor microenvironment.
+* **Interpretation**: This metric asks, *"What is the net 'push or pull' (internal spatial stress) exerted between different voxel populations due to their structural arrangement?"*
+* **Advantage**: It links spatial statistics directly to thermodynamic concepts, offering a non-invasive computational proxy for the internal architectural stresses within the tumor microenvironment.
 
 Configurational Disorder Index (:math:`CDI`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -12,7 +12,7 @@ from .core import (
     calculate_rdf_3d,
     calculate_glam_coordination_number,
     calculate_glam_potential_energy,
-    calculate_glam_pressure_virial,
+    calculate_glam_structural_pressure_index,
     calculate_configurational_disorder_index,
     calculate_glam_compressibility,
     calculate_rdf_shape_matrices,
@@ -118,7 +118,7 @@ def _process_single_voxel_worker(coords_z_y_x):
         req_str = " ".join(features_to_map)
         need_coord = "CoordNum" in req_str
         need_potential = "Potential" in req_str
-        need_pressure = "Pressure" in req_str
+        need_pressure = "Pressure" in req_str or "SPI" in req_str
         need_compress = "Compress" in req_str
         need_config_disorder = "ConfigurationalDisorderIndex" in req_str or "ConfigDisorder" in req_str
         need_fractal = "Fractal" in req_str
@@ -255,9 +255,9 @@ def _process_single_voxel_worker(coords_z_y_x):
             local_matrices["PotentialEnergy"] = reformat_dict_to_matrix(features_potential, num_gray_levels, "GLAM_PotentialEnergy_", None)
             
         if need_pressure:
-            features_pressure = calculate_glam_pressure_virial(local_rdf_df, num_gray_levels, local_level_counts, local_total_voxels)
-            local_matrices["PressureVirial"] = reformat_dict_to_matrix(features_pressure, num_gray_levels, "GLAM_PressureVirial_", None)
-            
+            features_pressure = calculate_glam_structural_pressure_index(local_rdf_df, num_levels, local_level_counts, local_total_voxels)
+            local_matrices["StructuralPressureIndex"] = reformat_dict_to_matrix(features_pressure, num_levels, "GLAM_StructuralPressureIndex_", None)            
+        
         if need_compress:
             features_compress = calculate_glam_compressibility(local_rdf_df, num_gray_levels)
             local_matrices["Compressibility"] = reformat_dict_to_matrix(features_compress, num_gray_levels, "GLAM_Compressibility_", None)

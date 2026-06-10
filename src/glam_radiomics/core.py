@@ -1256,14 +1256,14 @@ def calculate_glam_potential_energy(rdf_df, num_levels):
                 potential_energies[f'GLAM_PotentialEnergy_{alpha}_{beta}'] = energy
     return potential_energies
 
-def calculate_glam_pressure_virial(rdf_df, num_levels, level_counts, total_roi_voxels):
-    """Calculates the Pressure Virial (P*), the interaction component of pressure."""
+def calculate_glam_structural_pressure_index(rdf_df, num_levels, level_counts, total_roi_voxels):
+    """Calculates the Structural Pressure Index (SPI), formally analogous to the interaction component of pressure."""
     # --- Get config params ---
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
     # ---
 
-    pressure_virials = {}
+    spi_metrics = {}
     if rdf_df.empty or total_roi_voxels == 0: return {}
     r = rdf_df['r'].values
     if r.size < 2: return {}
@@ -1292,12 +1292,12 @@ def calculate_glam_pressure_virial(rdf_df, num_levels, level_counts, total_roi_v
                 
                 integral = np.trapezoid(integrand, r)
                 
-                pressure_virial = - (rho_alpha * rho_beta / 6.0) * 4 * np.pi * integral
-                pressure_virials[f'GLAM_PressureVirial_{alpha}_{beta}'] = pressure_virial
+                index_val = - (rho_alpha * rho_beta / 6.0) * 4 * np.pi * integral
+                spi_metrics[f'GLAM_StructuralPressureIndex_{alpha}_{beta}'] = index_val
             else:
-                pressure_virials[f'GLAM_PressureVirial_{alpha}_{beta}'] = np.nan
+                spi_metrics[f'GLAM_StructuralPressureIndex_{alpha}_{beta}'] = np.nan
                 
-    return pressure_virials
+    return spi_metrics
 
 def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels):
     """Calculates the Configurational Disorder Index (formerly Effective Structural Temperature)
