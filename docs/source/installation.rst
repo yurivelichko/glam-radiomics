@@ -12,14 +12,19 @@ Before installing GLAM, ensure you have the following requirements[cite: 3]:
 
 Installing from TestPyPI
 ------------------------
-Currently, the GLAM library is hosted on TestPyPI[cite: 5]. You can install it along with its standard dependencies using the following command:
+You can install GLAM-radiomics using the following command:
+
+.. code-block:: bash
+    pip install glam-radiomics
+
+or
 
 .. code-block:: bash
 
     pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ glam_radiomics
 
 .. note::
-   Make sure you have activated your virtual environment before running this command!
+   This release (v1.1.0) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2. Make sure you have activated your virtual environment before running this command!
 
 Key Dependencies
 ----------------
