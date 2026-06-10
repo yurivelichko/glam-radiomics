@@ -64,7 +64,7 @@ To evaluate the energetic stability of texture organization, GLAM computes the P
 
    W_{\alpha\beta}(r) = -k_B T \ln g_{\alpha\beta}(r)
 
-The total PMF energy is obtained by integrating this potential weighted by the RDF[cite: 72]:
+The total PMF energy is obtained by integrating this potential weighted by the RDF:
 
 .. math::
 

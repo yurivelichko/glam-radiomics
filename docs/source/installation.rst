@@ -28,7 +28,7 @@ or
 
 Key Dependencies
 ----------------
-When you install GLAM, the following core libraries are automatically integrated[cite: 7]:
+When you install GLAM, the following core libraries are automatically integrated:
 
 * **NumPy & SciPy**: Provide the computational backbone for RDF calculations, spatial KD-trees, and Statistical Mechanics descriptors[cite: 7].
 * **SimpleITK**: Handles the loading and normalization of 3D medical imaging formats like NIfTI (.nii.gz)[cite: 8].
