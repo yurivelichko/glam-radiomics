@@ -23,7 +23,7 @@ The core descriptor is the pair radial distribution function, :math:`g_{\alpha\b
 
 RDF Shape Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To capture the extensive information embedded in the full RDF curves without incurring the "curse of dimensionality," we transform key statistical properties of each :math:`g_{\alpha\beta}(r)` curve into a set of primary GLAM matrices. For every gray-level pair, we compute the Peak Position, Peak Height, Median, Variance, Skewness, and Kurtosis.
+To capture the extensive information embedded in the full RDF curves without incurring the "curse of dimensionality," we transform key statistical properties of each :math:`g_{\alpha\beta}(r)` curve into a set of primary GLAM matrices. For every gray-level pair, we compute the Peak Position, Dispersion Ratio, Peak Height, Median, Variance, Skewness, and Kurtosis.
 
 .. figure:: /_static/GLAM_RDFMedian.png
    :width: 700px

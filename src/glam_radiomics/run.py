@@ -354,7 +354,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
             else:
                 glam_matrices[f'{name}_Symlog'] = np.full_like(mat, np.nan) if mat is not None else None
 
-    ln_targets = ['Lacunarity', 'RDF_Median', 'RDF_PeakHeight', 'CoordNum', 'RDF_Variance']
+    ln_targets = ['Lacunarity', 'RDF_Median', 'RDF_PeakHeight', 'CoordNum', 'RDF_Variance', 'RDF_DispersionRatio']
     for name in ln_targets:
         if name in glam_matrices:
             mat = glam_matrices[name]

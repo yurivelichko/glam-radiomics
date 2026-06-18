@@ -1579,13 +1579,15 @@ def calculate_orientational_correlation_length(image_array, mask_array, max_radi
 def calculate_rdf_shape_matrices(rdf_df, num_levels):
     """
     Calculates primary matrices based on the shape of the g(r) curves.
-    UPDATED: Uses 'Non-Zero' statistics to handle variable tumor sizes robustly.
+    UPDATED: Uses 'Non-Zero' statistics to handle variable tumor sizes robustly,
+    and calculates the Dispersion Ratio (Variance/Mean).
     """
     if rdf_df.empty:
         return {}
 
     # Initialize empty matrices
     mat_peak_pos = np.full((num_levels, num_levels), np.nan)
+    mat_dispersion_ratio = np.full((num_levels, num_levels), np.nan) # NEW: Dispersion Ratio
 
     mat_log_median = np.full((num_levels, num_levels), np.nan)
     mat_log_var = np.full((num_levels, num_levels), np.nan)
@@ -1607,15 +1609,23 @@ def calculate_rdf_shape_matrices(rdf_df, num_levels):
                     mat_peak_pos[i, j] = r_values[peak_index]
 
                 # --- SMART STATISTICS (Ignore Trailing Zeros) ---
-                # 1. Log-Transform first
-                log_g_r_vector = np.log1p(g_r_vector)
-                
-                # 2. Filter: Only keep non-zero values (Active Texture Region)
-                # This automatically adapts to the tumor size.
                 valid_mask = g_r_vector > 1e-6 # Filter out the empty "tail"
+                active_raw_data = g_r_vector[valid_mask] # NEW: Raw data for Dispersion
+                
+                # 1. Calculate Raw Dispersion Ratio (Variance / Mean)
+                if active_raw_data.size > 2:
+                    raw_mean = np.mean(active_raw_data)
+                    raw_var = np.var(active_raw_data)
+                    if raw_mean > 0:
+                        mat_dispersion_ratio[i, j] = raw_var / raw_mean
+                    else:
+                        mat_dispersion_ratio[i, j] = 0.0
+
+                # 2. Log-Transform for standard shape stats
+                log_g_r_vector = np.log1p(g_r_vector)
                 active_log_data = log_g_r_vector[valid_mask]
                 
-                # 3. Calculate stats on the ACTIVE region only
+                # 3. Calculate stats on the ACTIVE log region only
                 if active_log_data.size > 2:
                     mat_log_median[i, j] = np.median(active_log_data)
                     mat_log_var[i, j] = np.var(active_log_data)
@@ -1628,6 +1638,7 @@ def calculate_rdf_shape_matrices(rdf_df, num_levels):
                 
     return {
         "RDF_PeakPosition": mat_peak_pos,
+        "RDF_DispersionRatio": mat_dispersion_ratio, # NEW: Return the matrix
         "LogRDF_Median": mat_log_median,
         "LogRDF_Variance": mat_log_var,
         "LogRDF_Skewness": mat_log_skew,
