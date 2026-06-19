@@ -111,6 +111,29 @@ GLAM uses algebraic topology to count discrete features that are invariant under
 * **Interpretation**: This metric asks, *"How many distinct islands, connective tunnels, and hollow voids exist within the tissue, regardless of their exact physical shape?"*
 * **Advantage**: Topology is completely invariant to stretching, bending, or scaling. This makes Betti numbers incredibly robust against patient positioning differences, organ deformation, and imaging variations.
 
+Topological Excess Features (Betti-0 Excess)
+--------------------------------------------
+
+The **Betti-0 Excess Matrix** (:math:`\Delta \beta_0`) quantifies the degree of spatial clustering or abnormal fragmentation of specific tissue phases relative to a purely random spatial distribution. In topological data analysis, the 0-th Betti number (:math:`\beta_0`) counts the number of connected components (or distinct fragments) of a given target space.
+
+To calculate the Betti-0 Excess, the pipeline first computes the structured topological state of the tumor. It then generates a randomized "null model" by randomly shuffling the spatial positions of all voxels within the region of interest (ROI), which preserves the exact density of each gray level but destroys all spatial correlations. The Betti-0 of this null model is calculated, and the excess is defined as the arithmetic difference between the structured and random states:
+
+.. math::
+
+   \Delta \beta_0(i, j) = \beta_0(i, j)_{\text{structured}} - \beta_0(i, j)_{\text{random}}
+
+Where:
+
+* :math:`i, j` represent the interacting gray levels. If :math:`i=j`, it represents the volumetric fragmentation of a single tissue; if :math:`i \neq j`, it represents the fragmentation of the interface between two tissues.
+* :math:`\beta_0(i, j)_{\text{structured}}` is the number of connected components in the actual tumor image.
+* :math:`\beta_0(i, j)_{\text{random}}` is the expected number of connected components if the tissue voxels were mixed perfectly at random.
+
+**Interpretation:**
+
+* **Negative Excess** (:math:`\Delta \beta_0 < 0`): The tissue has fewer fragments than expected by random chance. This indicates that the tissue strongly aggregates into large, cohesive, and continuous spatial clusters (high spatial affinity).
+* **Positive Excess** (:math:`\Delta \beta_0 > 0`): The tissue has more fragments than expected by random chance. This indicates extreme spatial dispersion or "shattering" of the tissue phase, suggesting active biological scattering or intermingling beyond what statistical noise would produce.
+* **Zero Excess** (:math:`\Delta \beta_0 \approx 0`): The spatial arrangement and fragmentation of the tissue are indistinguishable from a purely random mixture.
+
 Discrete Morphology
 -------------------
 This category extracts explicit geometric descriptors for distinct tissue clusters identified by gray-level thresholds.

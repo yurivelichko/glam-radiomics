@@ -130,7 +130,6 @@ def reformat_dict_to_matrix(glam_dict, num_levels, key_prefix, diag_prefix=None)
     matrix = np.full((num_levels, num_levels), np.nan)
     
     # 1. Handle off-diagonal / full matrix (ONLY IF PREFIX EXISTS)
-    # --- CRITICAL FIX: Skip this loop if key_prefix is None (i.e. for Diagonal-only matrices) ---
     if key_prefix is not None:
         for key, value in glam_dict.items():
             if not key.startswith(key_prefix): continue
