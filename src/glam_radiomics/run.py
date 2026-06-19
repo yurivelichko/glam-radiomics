@@ -343,8 +343,9 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     glam_matrices.update(rdf_shape_matrices)
 
     # --- Transformations (Symlog & Ln) ---
-    symlog_targets = ['StructuralPressureIndex', 'ConfigurationalDisorderIndex', 'B2', 'PotentialEnergy', 
-                      'RDF_Kurtosis', 'RDF_Skewness', 'Euler']
+    symlog_targets = [  'StructuralPressureIndex', 'ConfigurationalDisorderIndex', 'B2', 'PotentialEnergy', 
+                        'RDF_Kurtosis', 'RDF_Skewness', 'Euler', 
+                        'Betti0_Excess', 'Betti1_Excess', 'Betti2_Excess', 'Euler_Excess']
     
     for name in symlog_targets:
         if name in glam_matrices:
