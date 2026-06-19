@@ -111,28 +111,35 @@ GLAM uses algebraic topology to count discrete features that are invariant under
 * **Interpretation**: This metric asks, *"How many distinct islands, connective tunnels, and hollow voids exist within the tissue, regardless of their exact physical shape?"*
 * **Advantage**: Topology is completely invariant to stretching, bending, or scaling. This makes Betti numbers incredibly robust against patient positioning differences, organ deformation, and imaging variations.
 
-Topological Excess Features (Betti-0 Excess)
---------------------------------------------
+Topological Excess Features (Excess Matrices)
+---------------------------------------------
 
-The **Betti-0 Excess Matrix** (:math:`\Delta \beta_0`) quantifies the degree of spatial clustering or abnormal fragmentation of specific tissue phases relative to a purely random spatial distribution. In topological data analysis, the 0-th Betti number (:math:`\beta_0`) counts the number of connected components (or distinct fragments) of a given target space.
+**Excess Matrices** (:math:`\Delta M`) quantify the degree to which a specific topological property—such as fragmentation, porosity, or cavitation—deviates from a purely random spatial distribution. In the GLAM pipeline, these matrices are generated for all primary topological metrics: Betti-0 (fragments), Betti-1 (tunnels/loops), Betti-2 (voids), and the Euler Characteristic.
 
-To calculate the Betti-0 Excess, the pipeline first computes the structured topological state of the tumor. It then generates a randomized "null model" by randomly shuffling the spatial positions of all voxels within the region of interest (ROI), which preserves the exact density of each gray level but destroys all spatial correlations. The Betti-0 of this null model is calculated, and the excess is defined as the arithmetic difference between the structured and random states:
+To calculate an Excess Matrix, the pipeline first computes the structured topological state of the tumor. It then generates a randomized "null model" by randomly shuffling the spatial positions of all voxels within the region of interest (ROI). This preserves the exact density of each gray level but destroys all spatial correlations. The topology of this null model is calculated, and the excess is defined as the arithmetic difference between the structured and random states:
 
 .. math::
 
-   \Delta \beta_0(i, j) = \beta_0(i, j)_{\text{structured}} - \beta_0(i, j)_{\text{random}}
+   \Delta M(i, j) = M(i, j)_{\text{structured}} - M(i, j)_{\text{random}}
 
 Where:
 
-* :math:`i, j` represent the interacting gray levels. If :math:`i=j`, it represents the volumetric fragmentation of a single tissue; if :math:`i \neq j`, it represents the fragmentation of the interface between two tissues.
-* :math:`\beta_0(i, j)_{\text{structured}}` is the number of connected components in the actual tumor image.
-* :math:`\beta_0(i, j)_{\text{random}}` is the expected number of connected components if the tissue voxels were mixed perfectly at random.
+* :math:`M` represents the target topological metric (e.g., :math:`\beta_0`, :math:`\beta_1`, :math:`\beta_2`, or :math:`\chi`).
+* :math:`i, j` represent the interacting gray levels. If :math:`i=j`, it represents the volumetric topology of a single tissue; if :math:`i \neq j`, it represents the topology of the interface between two tissues.
+* :math:`M(i, j)_{\text{structured}}` is the measured topological feature in the actual tumor image.
+* :math:`M(i, j)_{\text{random}}` is the expected topological feature if the tissue voxels were mixed perfectly at random.
 
-**Interpretation:**
+**General Interpretation:**
 
-* **Negative Excess** (:math:`\Delta \beta_0 < 0`): The tissue has fewer fragments than expected by random chance. This indicates that the tissue strongly aggregates into large, cohesive, and continuous spatial clusters (high spatial affinity).
-* **Positive Excess** (:math:`\Delta \beta_0 > 0`): The tissue has more fragments than expected by random chance. This indicates extreme spatial dispersion or "shattering" of the tissue phase, suggesting active biological scattering or intermingling beyond what statistical noise would produce.
-* **Zero Excess** (:math:`\Delta \beta_0 \approx 0`): The spatial arrangement and fragmentation of the tissue are indistinguishable from a purely random mixture.
+* **Negative Excess** (:math:`\Delta M < 0`): The spatial architecture is highly ordered to *suppress* this specific topological feature compared to random noise.
+* **Positive Excess** (:math:`\Delta M > 0`): The biological architecture actively *amplifies* this topological feature beyond what statistical chance would produce.
+* **Zero Excess** (:math:`\Delta M \approx 0`): The topological arrangement of the tissue is indistinguishable from a purely random mixture.
+
+**Metric-Specific Biological Context:**
+
+* **Betti-0 Excess (Fragmentation):** Negative excess indicates strong spatial aggregation and cohesion (large, continuous tumor masses). Positive excess indicates severe tissue shattering or diffuse biological scattering.
+* **Betti-1 Excess (Porosity/Loops):** Negative excess implies a solid, non-porous structure. Positive excess suggests a highly interconnected, spongy, or web-like tissue architecture (often seen in complex vascular/stromal networks).
+* **Betti-2 Excess (Cavitation/Voids):** Negative excess indicates dense tissue with few internal pockets. Positive excess points to significant internal cavitation, such as isolated necrotic cores, fluid pockets, or cysts.
 
 Discrete Morphology
 -------------------
