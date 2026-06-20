@@ -37,9 +37,12 @@ A typical configuration file is structured as follows:
 # Note: configparser keys are case-insensitive, but values preserve case.
 
 [System]
-# Number of parallel processes to run. NumWorkers ~ 2 * Number of CPU Cores.
-# Use 1 for no parallelism. Use 4, 8, etc. based on your CPU.
-NumWorkers = 16
+# Number of parallel patient folders to process simultaneously.
+# CRITICAL: If using GPU Acceleration (CuPy), this dictates how many 
+# matrices are loaded into VRAM. 
+# Recommendation for 4GB-8GB GPUs: NumWorkers = 2 to 4
+# Recommendation for CPU-only: NumWorkers ~ 2 * Number of CPU Cores
+NumWorkers = 4
 
 [GLAM_Settings]
 MaxRdfRadius = 100
