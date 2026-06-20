@@ -7,7 +7,7 @@ GLAM 1.0.8
 ----------
 * March 2026, First public release
 
-GLAM 1.2.6 (Major Update)
+GLAM 1.2.8 (Major Update)
 -------------------------
 * June 2026, First public release
 * **GPU Acceleration:** The entire spatial calculation engine (including GLCM, GLRLM, GLSZM, Topology/Betti numbers, and Lacunarity) has been rewritten in pure CuPy. GLAM now dynamically batches tensor math based on available GPU VRAM, delivering >10x processing speeds.
