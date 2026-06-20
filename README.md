@@ -47,6 +47,7 @@ NumWorkers = 4
 [GLAM_Settings]
 MaxRdfRadius = 100
 AnisotropyCutoffRadius = 5
+MaxLocalShellRadius = 15
 NumRandomisations = 4
 RdfSamplePoints = 100
 

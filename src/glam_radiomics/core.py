@@ -2173,6 +2173,8 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
     peak_prominence = get_config('PeakProminence')
+
+    max_shell_radius = get_config('MaxLocalShellRadius', fallback=15)
     # ---
 
     config_disorder_indices = {}
@@ -2200,7 +2202,7 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
                 peaks, _ = find_peaks(g_struct, prominence=peak_prominence)
                 
                 if len(peaks) == 0:
-                    search_r = min(len(g_struct), 15) 
+                    search_r = min(len(g_r), max_shell_radius) 
                     if search_r == 0: raise ValueError("Not enough data")
                     first_peak_idx = np.argmax(g_struct[:search_r])
                     if first_peak_idx == 0: raise ValueError("Peak at r=1, no clear shell")

@@ -23,6 +23,7 @@ A typical configuration file is structured as follows:
     [GLAM_Settings]
     MaxRdfRadius = 100
     AnisotropyCutoffRadius = 5
+    MaxLocalShellRadius = 25
     NumRandomisations = 4
     RdfSamplePoints = 100
 
@@ -165,6 +166,12 @@ For multi-center studies or large cohorts, you can configure a script to loop th
 
     if __name__ == '__main__':
         main()
+
+Tuning the Local Shell Radius
+-----------------------------
+The ``MaxLocalShellRadius`` parameter acts as a biophysical circuit breaker for thermodynamic features like the Coordination Number and Configurational Disorder Index. In statistical physics, these metrics evaluate the immediate, local microenvironment (the "First Coordination Sphere"). 
+
+If a specific tissue interaction (e.g., a necrotic core to an edematous rim) does not form a localized cluster within this maximum radius, GLAM correctly identifies the interaction as a macroscopic gradient rather than a local topological shell, and will safely abort the local thermodynamic integration. The default of ``15`` is optimized for standard 1mm isotropic medical imaging. If you are applying GLAM to microscopic histology or ultra-high-resolution scans where local cell clusters span dozens of voxels, you should increase this parameter accordingly.
 
 Output Files
 ------------
