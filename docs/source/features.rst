@@ -1,52 +1,36 @@
 GLAM Feature Dictionary
 =======================
-The GLAM framework provides a fully standalone, standardized feature extraction pipeline that translates complex spatial patterns into quantitative biomarkers. It operates independently of external radiomics packages, offering a highly optimized native 3D extraction engine.
+The GLAM framework provides a fully standalone, standardized feature extraction pipeline that translates complex spatial patterns into quantitative biomarkers. It operates independently of external radiomics packages, offering a highly optimized native 3D extraction engine powered by GPU acceleration (CuPy).
 
 Features are organized into four primary domains: **Standard Radiomics**, **Statistical Mechanics & Thermodynamics**, **Soft Matter Physics**, and **Geometric & Topological Metrics**.
 
 Native Standard Radiomics Classes
 ---------------------------------
-GLAM includes a built-in, natively optimized engine for calculating standard 3D texture matrices. Unlike conventional implementations, GLAM utilizes **Dynamic Matrix Trimming**, which prevents the calculation of massive, sparse matrices (e.g., in GLRLM and GLSZM) by dynamically truncating empty run-length and zone-size columns, drastically improving computational speed and memory efficiency.
+GLAM includes a built-in, natively GPU-optimized engine for calculating standard 3D texture matrices. Unlike conventional implementations, GLAM utilizes **Dynamic Matrix Trimming**, which prevents the calculation of massive, sparse matrices (e.g., in GLRLM and GLSZM) by dynamically truncating empty run-length and zone-size columns, drastically improving computational speed and memory efficiency.
 
 * **Gray Level Co-occurrence Matrix (GLCM)**: Captures localized 3D voxel pairs (offset [0,0,1]).
 * **Gray Level Run Length Matrix (GLRLM)**: Quantifies continuous linear runs of identical gray levels.
 * **Gray Level Size Zone Matrix (GLSZM)**: Measures the size of contiguous 3D homogenous zones.
 * **Gray Level Dependence Matrix (GLDM)**: Captures the number of connected voxels that are dependent on a center voxel.
-* **Neighborhood Gray-Tone Difference Matrix (NGTDM)**: Quantifies the difference between a voxel and its average neighborhood intensity to capture coarseness and busyness.
+* **Neighborhood Gray-Tone Difference Matrix (NGTDM)**: Quantifies the difference between a voxel and its neighborhood.
+* **Excess and Ratio Matrices**: GLAM automatically bridges conventional radiomics with statistical physics by generating ``_Excess`` (Structured - Random) and ``_Ratio`` (Structured / Random) variants for all standard matrices, quantifying how much the tissue structure deviates from a purely stochastic arrangement.
 
-Statistical Mechanics and Thermodynamics Classes
-------------------------------------------------
-These classes treat voxels as interacting particles within a multi-component system.
+Statistical Mechanics & Thermodynamic Classes
+-------------------------------------------
+These features treat the tumor as a many-body physical system, calculating thermodynamic states using the Radial Distribution Function (RDF) and 4x Randomized Baselines.
 
-* **RDF Shape Statistics**: Transforms key statistical properties of each :math:`g_{\alpha\beta}(r)` curve—including Peak Position, Peak Height, Median, Variance, Skewness, and Kurtosis—into primary GLAM matrices.
-* **Second Virial Coefficient (:math:`B_2`)**: Distills distance-dependent RDF information into a single value where negative values indicate net attraction and positive values suggest net repulsion.
-* **Potential of Mean Force (PMF)**: Evaluates the energetic stability of texture organization based on the Boltzmann distribution.
-* **Isothermal Compressibility**: Quantifies the "sponginess" of the texture. High values imply large-scale density fluctuations (loose clustering), while low values indicate rigid, hyper-uniform distributions.
-* **Coordination Number (CN)**: Measures local packing or clustering, representing the average number of :math:`\beta`-voxels surrounding a reference :math:`\alpha`-voxel within the first coordination shell.
-* **Correlation Length (:math:`\xi`)**: Characterizes the spatial extent of structural order and the range of voxel interactions.
-* **Pressure Virial**: Captures the mechanical response within the texture. Positive values indicate expansion, and negative values indicate compaction.
-* **Effective Structural Temperature (:math:`T_{eff}$)**: Characterizes textural disorder and structural "noise" by comparing the observed image structure to a randomized counterpart.
+* **Second Virial Coefficient (B2)**: Quantifies the topological "attraction" (clustering) or "repulsion" between gray levels.
+* **Coordination Number (Z)**: Measures the exact number of voxels in the local, first coordination shell.
+* **Configurational Disorder Index**: (Formerly Effective Temperature) Quantifies the thermodynamic disorder strictly within the first coordination shell.
+* **Structural Pressure Index (SPI)**: Formally analogous to the interaction component of pressure.
+* **1-Wasserstein Distance (EMD)**: Measures the 'Biological Work' or 'Assembly Cost' of the tumor's spatial architecture by comparing the structured and random cumulative coordination profiles.
 
-Soft Matter and Liquid Crystal Classes
---------------------------------------
-A unique advantage of the GLAM framework is the integration of physical descriptors originally developed for liquid crystals and soft matter. These classes measure the orientational order and mechanical stress of biological tissues.
-
-
-* **Nematic Order Parameter (:math:`S`)**: Calculates the global alignment of intensity gradients within the tumor. Values approach 1 for highly aligned, fibrous, or directional structures, and 0 for completely isotropic textures.
-* **Nematic Order per Gray Level**: Calculates the :math:`S` parameter specifically for populations of individual gray levels to find isolated structural pathways.
-* **Local Nematic Alignment**: Measures the average dot-product alignment of local director fields (the primary orientation axis of a local neighborhood) across the entire region of interest.
-* **Orientational Correlation Length**: Derived from the :math:`g_2(r)` function, this describes the distance over which directional alignment persists before structural memory is lost.
-* **Tissue Stress (Laplacians)**: Calculates the Volumetric and Surface Laplacian means and variances, acting as mathematical analogues to the internal mechanical stress and boundary tension of the tumor.
-
-Geometric and Topological Classes
----------------------------------
-These classes quantify the specific spatial relationship between gray levels to model the underlying topology.
-
-* **Fractal Dimension**: Uses an optimized box-counting method to measure the multiscale complexity of both isolated tissue volumes and the interfaces between tissue types.
-* **Multifractal Spectrum**: Utilizes the Method of Moments to extract the Generalized Dimensions (:math:`D_q`), Spectral Width, and :math:`\alpha_0`, capturing complex heterogeneity that a single fractal dimension cannot.
-* **Lacunarity**: Quantifies the "gappiness" or heterogeneity of void spaces in the spatial arrangement.
-* **Topological Invariants**: Includes Betti numbers (:math:`B_0`, :math:`B_1`, :math:`B_2`) and the Euler characteristic to explicitly count disconnected islands, tunnels, and voids.
-* **Anisotropy**: Measures structural alignment and preferred orientation using gyration and nematic ordering tensors.
+Soft Matter & Geometric Classes
+-------------------------------
+* **Nematic Order Parameter (S)**: Measures the global and local directional alignment of tissue gradients.
+* **Orientational Correlation Length**: Quantifies how far directional alignment persists through the tissue.
+* **Topological Betti Numbers**: GPU-accelerated calculation of Connected Components (B0), Tunnels (B1), and Enclosed Voids (B2) using the Euler-Poincaré formula.
+* **Fractal Dimension & Lacunarity**: Optimized 3D Box-Counting and GPU Convolutions for multiscale complexity and structural heterogeneity.
 
 Matrix Reduction Features
 -------------------------
@@ -62,7 +46,10 @@ Once a multi-dimensional GLAM matrix is generated, the following statistics are 
    * - **First-Order Statistics**
      - Global distribution of affinity values in the matrix.
      - Mean, Variance, Skewness, Kurtosis, Energy.
-   * - **Thermodynamic & Thermodynamic State**
+   * - **Second-Order Meta**
+     - Structural heterogeneity of the affinity landscape matrix itself.
+     - Contrast, Correlation, Joint Entropy.
+   * - **Thermodynamic & State**
      - Quantifies the interaction and physical arrangement of tissue clusters.
      - Configurational Disorder Index, Pressure Virial, Coordination Number.
    * - **Profile Shape / Bimodality**
@@ -77,4 +64,4 @@ Once a multi-dimensional GLAM matrix is generated, the following statistics are 
 
 Integration with config.ini
 ---------------------------
-In your ``config.ini`` file, you can specify which of these features to map directly into 3D NIfTI volumes by adding them to the ``MapFeatures`` list (e.g., ``["PressureVirial_Symlog", "NematicOrder_S"]``).
+In your ``config.ini`` file, you can specify which of these features to map directly into 3D NIfTI volumes by adding them to the ``MapFeatures`` list (e.g., ``["ConfigurationalDisorderIndex_Symlog", "NematicOrder_S"]``).
