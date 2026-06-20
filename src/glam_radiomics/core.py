@@ -17,171 +17,293 @@ import scipy.integrate
 # Import config access
 from .config import get_config
 
-# =============================================================================#
-# === 1. MATRIX GENERATION FUNCTIONS (Corrected Trimming) ===#
-# =============================================================================#
+# Safely attempt to load CuPy for CUDA acceleration
+try:
+    import cupy as cp
+    HAS_GPU = cp.cuda.is_available()
+except ImportError:
+    HAS_GPU = False
 
+# =============================================================================
 
 def calculate_glcm_3d(image, num_gl):
-    """Calculates the symmetric 3D GLCM (offset [0,0,1]) and returns normalized matrix."""
-    glcm = np.zeros((num_gl, num_gl), dtype=np.uint32)
-    offset = (0, 0, 1) # Vertical offset
+    """Calculates the symmetric 3D GLCM (offset [0,0,1]). GPU Accelerated."""
+    if not HAS_GPU: return _calculate_glcm_3d_cpu(image, num_gl)
     
-    z, y, x = np.where(image > 0)
-    nz, ny, nx = z + offset[0], y + offset[1], x + offset[2]
+    image_gpu = cp.array(image, dtype=cp.int32)
+    glcm = cp.zeros((num_gl, num_gl), dtype=cp.uint32)
     
-    valid_neighbors = (nz < image.shape[0]) & (ny < image.shape[1]) & (nx < image.shape[2])
+    # Fast GPU offset slicing
+    img_curr = image_gpu[:, :, :-1]
+    img_next = image_gpu[:, :, 1:]
     
-    curr_vals = image[z[valid_neighbors], y[valid_neighbors], x[valid_neighbors]]
-    neighbor_vals = image[nz[valid_neighbors], ny[valid_neighbors], nx[valid_neighbors]]
+    mask = (img_curr > 0) & (img_next > 0)
     
-    mask_neighbor = neighbor_vals > 0
-    curr_vals = curr_vals[mask_neighbor]
-    neighbor_vals = neighbor_vals[mask_neighbor]
-    
-    np.add.at(glcm, (curr_vals - 1, neighbor_vals - 1), 1)
+    if cp.any(mask):
+        vals_curr = img_curr[mask] - 1
+        vals_next = img_next[mask] - 1
+        
+        # Flatten and bincount for instant 2D matrix accumulation
+        flat_indices = vals_curr * num_gl + vals_next
+        counts = cp.bincount(flat_indices, minlength=num_gl*num_gl)
+        glcm += counts.reshape((num_gl, num_gl)).astype(cp.uint32)
         
     glcm_symmetric = glcm + glcm.T
-    total = np.sum(glcm_symmetric)
-    if total == 0: return np.zeros_like(glcm_symmetric, dtype=float)
-    return glcm_symmetric.astype(float) / total
+    total = cp.sum(glcm_symmetric)
+    
+    if total == 0: return np.zeros((num_gl, num_gl), dtype=float)
+    return (glcm_symmetric.astype(cp.float64) / float(total)).get()
+
+def _calculate_glcm_3d_cpu(image, num_gl):
+    """Fallback CPU function for GLCM."""
+    glcm = np.zeros((num_gl, num_gl), dtype=np.uint32)
+    offset = (0, 0, 1) 
+    z, y, x = np.where(image > 0)
+    nz, ny, nx = z + offset[0], y + offset[1], x + offset[2]
+    valid = (nz < image.shape[0]) & (ny < image.shape[1]) & (nx < image.shape[2])
+    curr_vals = image[z[valid], y[valid], x[valid]]
+    neigh_vals = image[nz[valid], ny[valid], nx[valid]]
+    mask_neigh = neigh_vals > 0
+    curr_vals = curr_vals[mask_neigh]
+    neigh_vals = neigh_vals[mask_neigh]
+    np.add.at(glcm, (curr_vals - 1, neigh_vals - 1), 1)
+    glcm_sym = glcm + glcm.T
+    total = np.sum(glcm_sym)
+    if total == 0: return np.zeros_like(glcm_sym, dtype=float)
+    return glcm_sym.astype(float) / total
+
 
 def calculate_glrlm_3d(image, num_gl):
-    """Calculates 3D GLRLM with DYNAMIC TRIMMING."""
-    # 1. Initialize with max possible dimension
+    """Calculates 3D GLRLM. GPU Accelerated via boolean edge detection (No Python Loops)."""
+    if not HAS_GPU: return _calculate_glrlm_3d_cpu(image, num_gl)
+    
+    image_gpu = cp.array(image, dtype=cp.int32)
+    max_run = image_gpu.shape[2]
+    glrlm = cp.zeros((num_gl, max_run), dtype=cp.uint32)
+    
+    for g in range(1, num_gl + 1):
+        mask = (image_gpu == g)
+        if not cp.any(mask): continue
+        
+        # Pad along the X-axis to find natural boundaries
+        padded_mask = cp.pad(mask, ((0,0), (0,0), (1,1)), mode='constant', constant_values=False)
+        
+        # Detect rising (+1) and falling (-1) edges natively on GPU
+        diffs = padded_mask[:, :, 1:].astype(cp.int8) - padded_mask[:, :, :-1].astype(cp.int8)
+        
+        starts = cp.argwhere(diffs == 1)
+        ends = cp.argwhere(diffs == -1)
+        
+        # Calculate lengths
+        lengths = ends[:, 2] - starts[:, 2]
+        
+        if lengths.size > 0:
+            counts = cp.bincount(lengths)
+            length_indices = cp.arange(1, len(counts))
+            valid_counts = counts[1:]
+            
+            valid_mask = length_indices <= max_run
+            glrlm[g-1, length_indices[valid_mask] - 1] += valid_counts[valid_mask].astype(cp.uint32)
+
+    glrlm_cpu = glrlm.get()
+    if np.sum(glrlm_cpu) == 0: return np.zeros((num_gl, 1), dtype=float)
+    
+    col_sums = np.sum(glrlm_cpu, axis=0)
+    last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
+    glrlm_cpu = glrlm_cpu[:, :last_idx+1]
+    
+    return glrlm_cpu.astype(float) / np.sum(glrlm_cpu)
+
+def _calculate_glrlm_3d_cpu(image, num_gl):
+    """Fallback CPU function for GLRLM."""
     max_run = image.shape[2]
     glrlm = np.zeros((num_gl, max_run), dtype=np.uint32)
-
-    # 2. Fill Matrix
     for z in range(image.shape[0]):
         for y in range(image.shape[1]):
             row = image[z, y, :]
             padded = np.concatenate(([0], row, [0]))
             diffs = np.diff(padded)
             run_starts = np.where(diffs != 0)[0]
-            
             for i in range(len(run_starts) - 1):
                 start = run_starts[i]
                 end = run_starts[i+1]
                 val = padded[start+1]
                 length = end - start
-                
                 if val > 0:
                     if length <= max_run:
                         glrlm[val-1, length-1] += 1
-                        
-    # 3. TRIM EMPTY COLUMNS (The Fix)
     if np.sum(glrlm) == 0: 
         return np.zeros((num_gl, 1), dtype=float)
-    
-    # Sum down columns to find which run lengths actually exist
     col_sums = np.sum(glrlm, axis=0)
-    # Find the index of the last non-zero column
     last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
-    
-    # Slice the matrix to keep only up to that column
     glrlm = glrlm[:, :last_idx+1]
-
-    # 4. Normalize
     return glrlm.astype(float) / np.sum(glrlm)
 
+
 def calculate_glszm_3d(image, num_gl):
-    """Calculates 3D GLSZM with DYNAMIC TRIMMING."""
-    # 1. Initialize with safe upper bound (Total Voxel Count)
-    max_possible_zone = np.sum(image > 0)
+    """Calculates 3D GLSZM with GPU Acceleration and batched counting."""
+    if not HAS_GPU: return _calculate_glszm_3d_cpu(image, num_gl)
+    import cupyx.scipy.ndimage as cupy_ndimage
+    
+    image_gpu = cp.array(image, dtype=cp.int32)
+    max_possible_zone = int(cp.sum(image_gpu > 0))
     if max_possible_zone == 0: return np.zeros((num_gl, 1), dtype=float)
     
-    glszm = np.zeros((num_gl, max_possible_zone), dtype=np.uint32)
+    glszm = cp.zeros((num_gl, max_possible_zone), dtype=cp.uint32)
+    structure_3d = cp.ones((3,3,3), dtype=cp.int32)
     
-    # 2. Fill Matrix
+    for g in range(1, num_gl + 1):
+        binary_img = (image_gpu == g)
+        if not cp.any(binary_img): continue
+        
+        labeled, num_feats = cupy_ndimage.label(binary_img, structure=structure_3d)
+        if num_feats == 0: continue
+        
+        # GPU Vectorized region counting (Massive speedup over ndimage.sum)
+        roi_counts = cp.bincount(labeled.ravel())[1:] 
+        unique, counts = cp.unique(roi_counts, return_counts=True)
+        
+        # Ensure sizes don't exceed max bound
+        valid_idx = unique <= max_possible_zone
+        unique, counts = unique[valid_idx], counts[valid_idx]
+        
+        glszm[g-1, unique - 1] += counts.astype(cp.uint32)
+
+    glszm_cpu = glszm.get()
+    if np.sum(glszm_cpu) == 0: return np.zeros((num_gl, 1), dtype=float)
+    
+    col_sums = np.sum(glszm_cpu, axis=0)
+    last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
+    glszm_cpu = glszm_cpu[:, :last_idx+1]
+    
+    return glszm_cpu.astype(float) / np.sum(glszm_cpu)
+
+def _calculate_glszm_3d_cpu(image, num_gl):
+    max_possible_zone = np.sum(image > 0)
+    if max_possible_zone == 0: return np.zeros((num_gl, 1), dtype=float)
+    glszm = np.zeros((num_gl, max_possible_zone), dtype=np.uint32)
     for g in range(1, num_gl + 1):
         binary_img = (image == g)
         if not np.any(binary_img): continue
-        
         labeled, num_feats = ndimage.label(binary_img, structure=np.ones((3,3,3)))
         if num_feats == 0: continue
-        
         roi_counts = ndimage.sum(binary_img, labeled, index=np.arange(1, num_feats + 1))
-        
         unique, counts = np.unique(roi_counts, return_counts=True)
         for size, count in zip(unique, counts):
             idx = int(size) - 1
-            if idx < max_possible_zone:
-                glszm[g-1, idx] += count
-
-    # 3. TRIM EMPTY COLUMNS (The Fix)
-    if np.sum(glszm) == 0: 
-        return np.zeros((num_gl, 1), dtype=float)
-    
+            if idx < max_possible_zone: glszm[g-1, idx] += count
+    if np.sum(glszm) == 0: return np.zeros((num_gl, 1), dtype=float)
     col_sums = np.sum(glszm, axis=0)
     last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
     glszm = glszm[:, :last_idx+1]
-    
-    # 4. Normalize
     return glszm.astype(float) / np.sum(glszm)
 
+
 def calculate_gldm_3d(image, num_gl, alpha=0):
-    """Calculates 3D GLDM and returns normalized matrix."""
+    """Calculates 3D GLDM using GPU 3D Convolutions."""
+    if not HAS_GPU: return _calculate_gldm_3d_cpu(image, num_gl, alpha)
+    import cupyx.scipy.ndimage as cupy_ndimage
+    
+    gldm = cp.zeros((num_gl, 27), dtype=cp.uint32)
+    footprint = cp.ones((3,3,3), dtype=cp.int32)
+    footprint[1,1,1] = 0
+    image_gpu = cp.array(image, dtype=cp.int32)
+    
+    for g in range(1, num_gl + 1):
+        mask_g = (image_gpu == g)
+        if not cp.any(mask_g): continue
+        if alpha == 0:
+            neighbor_count = cupy_ndimage.convolve(mask_g.astype(cp.int32), footprint, mode='constant', cval=0)
+            counts = neighbor_count[mask_g]
+            unique, u_counts = cp.unique(counts, return_counts=True)
+            gldm[g-1, unique] += u_counts.astype(cp.uint32)
+            
+    gldm_cpu = gldm.get()
+    if np.sum(gldm_cpu) == 0: return np.zeros((num_gl, 1), dtype=float)
+    col_sums = np.sum(gldm_cpu, axis=0)
+    last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
+    gldm_cpu = gldm_cpu[:, :last_idx+1]
+    return gldm_cpu.astype(float) / np.sum(gldm_cpu)
+
+def _calculate_gldm_3d_cpu(image, num_gl, alpha=0):
     gldm = np.zeros((num_gl, 27), dtype=np.uint32)
     footprint = np.ones((3,3,3))
     footprint[1,1,1] = 0
-    
     for g in range(1, num_gl + 1):
         mask_g = (image == g)
         if not np.any(mask_g): continue
-        
         if alpha == 0:
             neighbor_count = ndimage.convolve(mask_g.astype(int), footprint, mode='constant', cval=0)
             counts = neighbor_count[mask_g]
             unique, u_counts = np.unique(counts, return_counts=True)
-            for k, c in zip(unique, u_counts):
-                gldm[g-1, k] += c
-                
+            for k, c in zip(unique, u_counts): gldm[g-1, k] += c
     if np.sum(gldm) == 0: return np.zeros((num_gl, 1), dtype=float)
-    
-    # Optional: Trim GLDM columns too if no voxel has e.g. 26 neighbors
     col_sums = np.sum(gldm, axis=0)
     last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
     gldm = gldm[:, :last_idx+1]
-    
     return gldm.astype(float) / np.sum(gldm)
 
+
 def calculate_ngtdm_3d(image, num_gl):
-    """
-    Calculates NGTDM. Returns a DataFrame-like dictionary or matrix.
-    NGTDM is strictly 3 columns (count, sum_diff, probability).
-    """
-    ngtdm = np.zeros((num_gl, 3), dtype=float)
+    """Calculates NGTDM using GPU 3D Convolutions."""
+    if not HAS_GPU: return _calculate_ngtdm_3d_cpu(image, num_gl)
+    import cupyx.scipy.ndimage as cupy_ndimage
     
-    kernel = np.ones((3,3,3))
+    ngtdm = cp.zeros((num_gl, 3), dtype=cp.float64)
+    kernel = cp.ones((3,3,3), dtype=cp.float32)
     kernel[1,1,1] = 0
     
-    mask = (image > 0).astype(float)
-    neighbor_count_map = ndimage.convolve(mask, kernel, mode='constant', cval=0)
+    image_gpu = cp.array(image, dtype=cp.float32)
+    mask_gpu = (image_gpu > 0).astype(cp.float32)
+    
+    neighbor_count_map = cupy_ndimage.convolve(mask_gpu, kernel, mode='constant', cval=0)
     valid_neighborhood = neighbor_count_map > 0
     
-    sum_neighbor_vals = ndimage.convolve(image.astype(float), kernel, mode='constant', cval=0)
-    avg_neighbor_map = np.zeros_like(image, dtype=float)
+    sum_neighbor_vals = cupy_ndimage.convolve(image_gpu, kernel, mode='constant', cval=0)
+    avg_neighbor_map = cp.zeros_like(image_gpu)
     avg_neighbor_map[valid_neighborhood] = sum_neighbor_vals[valid_neighborhood] / neighbor_count_map[valid_neighborhood]
     
-    diff_map = np.abs(image - avg_neighbor_map)
+    diff_map = cp.abs(image_gpu - avg_neighbor_map)
     
     for g in range(1, num_gl + 1):
-        mask_g = (image == g)
-        n_i = np.sum(mask_g)
+        mask_g = (image_gpu == g)
+        n_i = cp.sum(mask_g)
         if n_i == 0: continue
         
         valid_mask_g = mask_g & valid_neighborhood
-        s_i = np.sum(diff_map[valid_mask_g])
+        s_i = cp.sum(diff_map[valid_mask_g])
         
         ngtdm[g-1, 0] = n_i
         ngtdm[g-1, 1] = s_i
 
+    ngtdm_cpu = ngtdm.get()
+    total_n = np.sum(ngtdm_cpu[:, 0])
+    if total_n > 0: ngtdm_cpu[:, 2] = ngtdm_cpu[:, 0] / total_n
+    return ngtdm_cpu
+
+def _calculate_ngtdm_3d_cpu(image, num_gl):
+    ngtdm = np.zeros((num_gl, 3), dtype=float)
+    kernel = np.ones((3,3,3))
+    kernel[1,1,1] = 0
+    mask = (image > 0).astype(float)
+    neighbor_count_map = ndimage.convolve(mask, kernel, mode='constant', cval=0)
+    valid_neighborhood = neighbor_count_map > 0
+    sum_neighbor_vals = ndimage.convolve(image.astype(float), kernel, mode='constant', cval=0)
+    avg_neighbor_map = np.zeros_like(image, dtype=float)
+    avg_neighbor_map[valid_neighborhood] = sum_neighbor_vals[valid_neighborhood] / neighbor_count_map[valid_neighborhood]
+    diff_map = np.abs(image - avg_neighbor_map)
+    for g in range(1, num_gl + 1):
+        mask_g = (image == g)
+        n_i = np.sum(mask_g)
+        if n_i == 0: continue
+        valid_mask_g = mask_g & valid_neighborhood
+        s_i = np.sum(diff_map[valid_mask_g])
+        ngtdm[g-1, 0] = n_i
+        ngtdm[g-1, 1] = s_i
     total_n = np.sum(ngtdm[:, 0])
-    if total_n > 0:
-        ngtdm[:, 2] = ngtdm[:, 0] / total_n
-        
+    if total_n > 0: ngtdm[:, 2] = ngtdm[:, 0] / total_n
     return ngtdm
+
 
 def calculate_glrlm_features(matrix, prefix):
     """Calculates scalar features from a GLRLM matrix (NumGL x RunLength)."""
@@ -523,49 +645,147 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
                      sample_mask=None): 
     """
     Calculates the Radial Distribution Function (RDF) for a 3D image.
-    
-    Args:
-        image_3d: The input image (quantized) containing the "System" (neighbors).
-        sample_mask: (Optional) A binary mask of the same shape as image_3d. 
-                     If provided, Reference Points are chosen ONLY from voxels 
-                     where sample_mask == 1. Neighbors are still chosen from 
-                     the entire image_3d.
+    Automatically detects CUDA availability and scales memory batching.
+    Uses pure cuBLAS matrix math, avoiding RAPIDS cuVS dependencies on Windows.
     """
     
-    # Remove the global check: if NUM_RANDOMISATIONS <= 1:
-    if num_randomisations == 0:
-         pass 
-    elif num_randomisations == 1:
-         pass 
-    
-    # 1. Define ALL potential neighbors (The "System")
-    # These include pixels in the Halo/Padding
+    # 1. Hardware Check & CPU Fallback
+    if not HAS_GPU:
+        print("  > DEBUG: No GPU detected. Falling back to CPU cKDTree RDF calculation.")
+        return _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
+                                     total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask)
+        
+    # 2. Define ALL potential neighbors (The "System")
     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
-    coord_trees = [cKDTree(c) if len(c) > 0 else None for c in coords]
+    
+    # Move neighbor coordinates to GPU VRAM once
+    coords_gpu = [cp.array(c, dtype=cp.float32) if len(c) > 0 else None for c in coords]
+    
     rdf_data = defaultdict(lambda: defaultdict(float))
     
+    # Query GPU Memory to determine safe batch size
+    dev = cp.cuda.Device(0)
+    free_mem, _ = dev.mem_info
+    
+    # We leave a 50% safety buffer for VRAM overhead
+    safe_vram_bytes = free_mem * 0.5 
+
     for alpha in range(num_levels):
         if level_counts[alpha] == 0: continue
         
-        # 2. Define Reference Points (The "Window")
+        # Define Reference Points (The "Window")
         coords_alpha_all = coords[alpha]
         
         if sample_mask is not None:
-            # Filter: Keep points where sample_mask is True
-            # This restricts the measurement "center" to the strict ROI/Window
             if len(coords_alpha_all) == 0: continue
-            
-            # Efficient boolean indexing
             is_in_mask = sample_mask[coords_alpha_all[:,0], coords_alpha_all[:,1], coords_alpha_all[:,2]] > 0
             coords_alpha = coords_alpha_all[is_in_mask]
         else:
-            # Default behavior: Measure everywhere
             coords_alpha = coords_alpha_all
 
-        # Check if we have enough points in the Window to calculate stats
         if len(coords_alpha) == 0: continue
 
-        # Downsample if needed (Sample ONLY from the valid window points)
+        num_ref_points = min(len(coords_alpha), rdf_sample_points)
+        if num_ref_points == 0: continue
+        
+        ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
+        ref_points = coords_alpha[ref_indices]
+        
+        # Move active reference points to GPU
+        ref_points_gpu = cp.array(ref_points, dtype=cp.float32)
+
+        for beta in range(num_levels):
+            if level_counts[beta] == 0: continue
+            target_points_gpu = coords_gpu[beta]
+            if target_points_gpu is None: continue
+
+            # --- DYNAMIC BATCHING ---
+            num_targets = target_points_gpu.shape[0]
+            # dist_sq and dists arrays will take batch_size * num_targets * 4 bytes each
+            bytes_per_ref = num_targets * 8
+            
+            # Calculate how many reference points we can process simultaneously
+            batch_size = int(safe_vram_bytes // bytes_per_ref)
+            batch_size = max(1, min(batch_size, num_ref_points)) # Clamp between 1 and total points
+            
+            pair_counts = cp.zeros(max_radius + 1, dtype=cp.int32)
+
+            # Pre-calculate target squared norms for fast Euclidean distance
+            B_sq = cp.sum(target_points_gpu**2, axis=1)
+
+            for i in range(0, num_ref_points, batch_size):
+                batch_refs = ref_points_gpu[i : i + batch_size]
+                
+                # --- PURE CUPY EUCLIDEAN DISTANCE (cuBLAS) ---
+                # Mathematical expansion: ||A - B||^2 = ||A||^2 + ||B||^2 - 2(A . B)
+                A_sq = cp.sum(batch_refs**2, axis=1, keepdims=True)
+                AB = cp.matmul(batch_refs, target_points_gpu.T)
+                
+                dist_sq = A_sq + B_sq - 2.0 * AB
+                dists = cp.sqrt(cp.maximum(dist_sq, 0.0)) # maximum() prevents float precision negatives
+                
+                # Filter out of bounds and self-interactions
+                if alpha == beta:
+                    valid_mask = (dists > 1e-6) & (dists <= max_radius + 0.99)
+                else:
+                    valid_mask = (dists <= max_radius + 0.99)
+                
+                valid_dists = dists[valid_mask]
+                
+                # Bin the distances into spherical shells
+                if valid_dists.size > 0:
+                    bins = cp.floor(valid_dists).astype(cp.int32)
+                    batch_counts = cp.bincount(bins, minlength=max_radius + 1)
+                    pair_counts += batch_counts[:max_radius + 1]
+            
+            # Move histogram counts back to CPU for final scaling
+            pair_counts_cpu = pair_counts.get()
+            
+            rho_beta = level_counts[beta] / total_roi_voxels
+            if rho_beta == 0: continue
+            
+            for r in range(1, max_radius + 1):
+                count = pair_counts_cpu[r]
+                if count > 0:
+                    dn = count / num_ref_points
+                    shell_volume = (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3)
+                    if shell_volume > 0:
+                        rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
+
+    # Clean up GPU memory
+    cp.get_default_memory_pool().free_all_blocks()
+
+    df_data = []
+    for r in range(1, max_radius + 1):
+        row = {'r': r}
+        for alpha in range(num_levels):
+            for beta in range(num_levels):
+                key = f'g_{alpha}_{beta}'
+                row[key] = rdf_data.get((alpha, beta), {}).get(r, 0)
+        df_data.append(row)
+
+    return pd.DataFrame(df_data)
+
+def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask=None):
+    """
+    Fallback CPU function using scipy cKDTree.
+    """
+    coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
+    rdf_data = defaultdict(lambda: defaultdict(float))
+
+    for alpha in range(num_levels):
+        if level_counts[alpha] == 0: continue
+        
+        coords_alpha_all = coords[alpha]
+        if sample_mask is not None:
+            if len(coords_alpha_all) == 0: continue
+            is_in_mask = sample_mask[coords_alpha_all[:,0], coords_alpha_all[:,1], coords_alpha_all[:,2]] > 0
+            coords_alpha = coords_alpha_all[is_in_mask]
+        else:
+            coords_alpha = coords_alpha_all
+
+        if len(coords_alpha) == 0: continue
+
         num_ref_points = min(len(coords_alpha), rdf_sample_points)
         if num_ref_points == 0: continue
         
@@ -573,36 +793,34 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         ref_points = coords_alpha[ref_indices]
 
         for beta in range(num_levels):
-            # Beta points (neighbors) come from the FULL SYSTEM (coords), not the mask
             if level_counts[beta] == 0: continue
-            tree_beta = coord_trees[beta]
-            if tree_beta is None: continue
-
-            neighbors_at_max_radius = tree_beta.query_ball_point(ref_points, max_radius)
-            pair_counts = defaultdict(int)
-
-            for i in range(num_ref_points):
-                if alpha == beta:
-                    # Self-interaction check uses the full tree
-                    dist_result, _ = tree_beta.query(ref_points[i], k=min(len(coords[beta]), num_ref_points + 1))
-                    distances = np.atleast_1d(dist_result)
-                    distances = distances[distances > 1e-6]
-                else:
-                    if not neighbors_at_max_radius[i]: continue
-                    distances = np.linalg.norm(tree_beta.data[neighbors_at_max_radius[i]] - ref_points[i], axis=1)
-
-                bins = np.floor(distances).astype(int)
-                for r in range(1, max_radius + 1):
-                    count = np.sum(bins == r)
-                    pair_counts[r] += count
             
-            # Density is calculated over the WHOLE patch volume
+            target_points = coords[beta]
+            tree = cKDTree(target_points)
+            
+            # Using cKDTree to find neighbors within max_radius
+            neighbors = tree.query_ball_point(ref_points, max_radius + 0.99)
+            
+            pair_counts = np.zeros(max_radius + 1)
+            for i, n_indices in enumerate(neighbors):
+                for j in n_indices:
+                    # Skip self-interaction
+                    if alpha == beta and np.array_equal(ref_points[i], target_points[j]):
+                        continue
+                        
+                    dist = np.linalg.norm(ref_points[i] - target_points[j])
+                    if dist <= max_radius + 0.99:
+                        r_bin = int(np.floor(dist))
+                        if r_bin <= max_radius:
+                            pair_counts[r_bin] += 1
+            
             rho_beta = level_counts[beta] / total_roi_voxels
             if rho_beta == 0: continue
             
             for r in range(1, max_radius + 1):
-                if r in pair_counts:
-                    dn = pair_counts[r] / num_ref_points
+                count = pair_counts[r]
+                if count > 0:
+                    dn = count / num_ref_points
                     shell_volume = (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3)
                     if shell_volume > 0:
                         rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
@@ -617,6 +835,109 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         df_data.append(row)
 
     return pd.DataFrame(df_data)
+
+# def calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
+#                      total_roi_voxels, num_randomisations, rdf_sample_points, 
+#                      sample_mask=None): 
+#     """
+#     Calculates the Radial Distribution Function (RDF) for a 3D image.
+    
+#     Args:
+#         image_3d: The input image (quantized) containing the "System" (neighbors).
+#         sample_mask: (Optional) A binary mask of the same shape as image_3d. 
+#                      If provided, Reference Points are chosen ONLY from voxels 
+#                      where sample_mask == 1. Neighbors are still chosen from 
+#                      the entire image_3d.
+#     """
+    
+#     from scipy.spatial import cKDTree
+
+#     # Remove the global check: if NUM_RANDOMISATIONS <= 1:
+#     if num_randomisations == 0:
+#          pass 
+#     elif num_randomisations == 1:
+#          pass 
+    
+#     # 1. Define ALL potential neighbors (The "System")
+#     # These include pixels in the Halo/Padding
+#     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
+#     coord_trees = [cKDTree(c) if len(c) > 0 else None for c in coords]
+#     rdf_data = defaultdict(lambda: defaultdict(float))
+    
+#     for alpha in range(num_levels):
+#         if level_counts[alpha] == 0: continue
+        
+#         # 2. Define Reference Points (The "Window")
+#         coords_alpha_all = coords[alpha]
+        
+#         if sample_mask is not None:
+#             # Filter: Keep points where sample_mask is True
+#             # This restricts the measurement "center" to the strict ROI/Window
+#             if len(coords_alpha_all) == 0: continue
+            
+#             # Efficient boolean indexing
+#             is_in_mask = sample_mask[coords_alpha_all[:,0], coords_alpha_all[:,1], coords_alpha_all[:,2]] > 0
+#             coords_alpha = coords_alpha_all[is_in_mask]
+#         else:
+#             # Default behavior: Measure everywhere
+#             coords_alpha = coords_alpha_all
+
+#         # Check if we have enough points in the Window to calculate stats
+#         if len(coords_alpha) == 0: continue
+
+#         # Downsample if needed (Sample ONLY from the valid window points)
+#         num_ref_points = min(len(coords_alpha), rdf_sample_points)
+#         if num_ref_points == 0: continue
+        
+#         ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
+#         ref_points = coords_alpha[ref_indices]
+
+#         for beta in range(num_levels):
+#             # Beta points (neighbors) come from the FULL SYSTEM (coords), not the mask
+#             if level_counts[beta] == 0: continue
+#             tree_beta = coord_trees[beta]
+#             if tree_beta is None: continue
+
+#             neighbors_at_max_radius = tree_beta.query_ball_point(ref_points, max_radius)
+#             pair_counts = defaultdict(int)
+
+#             for i in range(num_ref_points):
+#                 if alpha == beta:
+#                     # Self-interaction check uses the full tree
+#                     dist_result, _ = tree_beta.query(ref_points[i], k=min(len(coords[beta]), num_ref_points + 1))
+#                     distances = np.atleast_1d(dist_result)
+#                     distances = distances[distances > 1e-6]
+#                 else:
+#                     if not neighbors_at_max_radius[i]: continue
+#                     distances = np.linalg.norm(tree_beta.data[neighbors_at_max_radius[i]] - ref_points[i], axis=1)
+
+#                 bins = np.floor(distances).astype(int)
+#                 for r in range(1, max_radius + 1):
+#                     count = np.sum(bins == r)
+#                     pair_counts[r] += count
+            
+#             # Density is calculated over the WHOLE patch volume
+#             rho_beta = level_counts[beta] / total_roi_voxels
+#             if rho_beta == 0: continue
+            
+#             for r in range(1, max_radius + 1):
+#                 if r in pair_counts:
+#                     dn = pair_counts[r] / num_ref_points
+#                     shell_volume = (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3)
+#                     if shell_volume > 0:
+#                         rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
+
+#     df_data = []
+#     for r in range(1, max_radius + 1):
+#         row = {'r': r}
+#         for alpha in range(num_levels):
+#             for beta in range(num_levels):
+#                 key = f'g_{alpha}_{beta}'
+#                 row[key] = rdf_data.get((alpha, beta), {}).get(r, 0)
+#         df_data.append(row)
+
+#     return pd.DataFrame(df_data)
+#     
 
 def calculate_geometric_factor(mask_array, max_radius, rdf_sample_points):
     """
@@ -815,6 +1136,7 @@ def calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels):
                 glam_b2_coeffs[b2_key] = B2
     return glam_b2_coeffs
 
+
 def calculate_glam_correlation_length(rdf_structured_df, rdf_random_df, num_levels):
     """Calculates the Positional Correlation Length."""
     savgol_window = get_config('SavgolWindow')
@@ -824,6 +1146,9 @@ def calculate_glam_correlation_length(rdf_structured_df, rdf_random_df, num_leve
     if rdf_structured_df.empty or rdf_random_df.empty: return {}
     def exp_decay(r, A, xi): return A * np.exp(-r / xi)
     
+    max_radius = get_config('MaxRdfRadius')
+    dynamic_cap = max_radius * 5.0  # e.g., 50.0 if max_radius is 10
+
     for alpha in range(num_levels):
         for beta in range(num_levels):
             key = f'g_{alpha}_{beta}'
@@ -854,12 +1179,17 @@ def calculate_glam_correlation_length(rdf_structured_df, rdf_random_df, num_leve
                 if np.mean(h_fit) > h_fit[0] * 0.95 and np.var(h_fit) < 1e-4 : raise ValueError("Data is too flat.")
                 
                 initial_guess = [np.abs(h_r[peak_index]), 3.0] 
-                popt, _ = curve_fit(exp_decay, r_fit, h_fit, p0=initial_guess, maxfev=5000, bounds=([-np.inf, 0], [np.inf, np.inf]))
+                #popt, _ = curve_fit(exp_decay, r_fit, h_fit, p0=initial_guess, maxfev=5000, bounds=([-np.inf, 0], [np.inf, np.inf]))
+                
+                popt, _ = curve_fit(exp_decay, r_fit, h_fit, p0=initial_guess, maxfev=1000, 
+                                    ftol=1e-3, method='trf', bounds=([-np.inf, 0], [np.inf, dynamic_cap])
+)
                 glam_corr_lengths[corr_len_key] = popt[1]
                 
             except (RuntimeError, ValueError) as e:
                 glam_corr_lengths[corr_len_key] = np.nan
     return glam_corr_lengths
+
 
 def calculate_glam_coordination_number(rdf_df, num_levels, level_counts, total_roi_voxels):
     """Calculates the Coordination Number (Z)."""
@@ -949,17 +1279,178 @@ def calculate_glam_compressibility(rdf_df, num_levels):
             
     return compressibility_metrics
 
+
+# def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
+#     """Calculates anisotropic GLAM features using the gyration tensor."""
+#     # print("  - Starting Anisotropic GLAM analysis...")
+#     anisotropic_features = {}
+#     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
+    
+#     for alpha in range(num_levels):
+#         for beta in range(num_levels):
+            
+#             # --- FILL LOCATION 1: POPULATION CHECK ---
+#             # If not enough points to measure, set to 0.0 (Isotropic) and skip
+#             if len(coords[alpha]) == 0 or len(coords[beta]) < 10: 
+#                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
+#                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
+#                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
+#                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
+#                 continue
+
+#             num_ref_points = min(len(coords[alpha]), 50)
+#             # Safety: Ensure we don't sample more than exists
+#             if len(coords[alpha]) < num_ref_points:
+#                  ref_indices = np.arange(len(coords[alpha]))
+#             else:
+#                  ref_indices = np.random.choice(len(coords[alpha]), num_ref_points, replace=False)
+            
+#             avg_gyration_tensor = np.zeros((3, 3))
+#             valid_tensors = 0
+            
+#             for i in ref_indices:
+#                 ref_point = coords[alpha][i]
+#                 vectors = coords[beta] - ref_point
+#                 distances = np.linalg.norm(vectors, axis=1)
+#                 neighbors = vectors[distances < cutoff_radius]
+                
+#                 if len(neighbors) < 3: continue
+                
+#                 gyration_tensor = np.cov(neighbors, rowvar=False)
+#                 avg_gyration_tensor += gyration_tensor
+#                 valid_tensors += 1
+            
+#             # --- FILL LOCATION 2: VALID TENSOR CHECK ---
+#             if valid_tensors > 0:
+#                 avg_gyration_tensor /= valid_tensors
+#                 # Check for NaNs/Infs in the tensor before Eigendecomposition
+#                 if np.any(np.isnan(avg_gyration_tensor)) or np.any(np.isinf(avg_gyration_tensor)):
+#                      l1, l2, l3 = 0.0, 0.0, 0.0
+#                      anisotropy = 0.0
+#                 else:
+#                     try:
+#                         eigenvalues, _ = np.linalg.eigh(avg_gyration_tensor)
+#                         eigenvalues = np.sort(eigenvalues)[::-1]
+#                         l1, l2, l3 = eigenvalues
+                        
+#                         denom = (l1 + l2 + l3)**2
+#                         if denom > 1e-9:
+#                             anisotropy = 1 - 3 * (l1*l2 + l2*l3 + l3*l1) / denom
+#                         else:
+#                             anisotropy = 0.0
+#                     except np.linalg.LinAlgError:
+#                         l1, l2, l3 = 0.0, 0.0, 0.0
+#                         anisotropy = 0.0
+
+#                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = anisotropy
+#                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = l1
+#                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = l2
+#                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = l3
+            
+#             else:
+#                 # If we found reference points but NO valid neighbors within radius
+#                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
+#                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
+#                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
+#                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
+
+#     # print("  - Anisotropic GLAM analysis complete.")
+#     return anisotropic_features
+
 def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
-    """Calculates anisotropic GLAM features using the gyration tensor."""
-    # print("  - Starting Anisotropic GLAM analysis...")
+    """
+    Calculates anisotropic GLAM features using the gyration tensor.
+    GPU Accelerated using fully vectorized batched tensor covariance.
+    """
+    if not HAS_GPU:
+        return _calculate_anisotropic_glam_features_cpu(image_3d, num_levels, cutoff_radius)
+
+    anisotropic_features = {}
+    
+    coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
+    coords_gpu = [cp.array(c, dtype=cp.float32) if len(c) > 0 else None for c in coords]
+    cutoff_sq = cutoff_radius ** 2
+    
+    for alpha in range(num_levels):
+        for beta in range(num_levels):
+            if coords_gpu[alpha] is None or coords_gpu[beta] is None or len(coords_gpu[beta]) < 10: 
+                anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
+                anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
+                anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
+                anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
+                continue
+
+            num_ref_points = min(len(coords_gpu[alpha]), 50)
+            if len(coords_gpu[alpha]) < num_ref_points:
+                 ref_indices = np.arange(len(coords_gpu[alpha]))
+            else:
+                 ref_indices = np.random.choice(len(coords_gpu[alpha]), num_ref_points, replace=False)
+            
+            ref_coords_gpu = coords_gpu[alpha][ref_indices]
+            target_coords_gpu = coords_gpu[beta]
+            
+            # --- FULLY VECTORIZED GPU BATCHING (No more Python loops!) ---
+            # Broadcasting: (50, 1, 3) - (1, N, 3) -> (50, N, 3)
+            vectors = target_coords_gpu[cp.newaxis, :, :] - ref_coords_gpu[:, cp.newaxis, :]
+            
+            dist_sq = cp.sum(vectors**2, axis=2) # Shape: (50, N)
+            mask = dist_sq < cutoff_sq # Shape: (50, N)
+            
+            valid_counts = cp.sum(mask, axis=1) # Shape: (50,)
+            valid_refs = valid_counts >= 3 # Minimum 3 neighbors for a 3D covariance
+            
+            if cp.any(valid_refs):
+                # Filter down to only reference points with enough neighbors
+                v_counts = valid_counts[valid_refs]
+                masked_vectors = vectors[valid_refs] * mask[valid_refs, :, cp.newaxis]
+                
+                # Calculate Means: Sum / Count -> (V, 3)
+                means = cp.sum(masked_vectors, axis=1) / v_counts[:, cp.newaxis]
+                
+                # Subtract means (center the data)
+                centered = masked_vectors - means[:, cp.newaxis, :]
+                centered *= mask[valid_refs, :, cp.newaxis] # Re-zero the out-of-bounds neighbors
+                
+                # Batched Covariance: (V, 3, N) @ (V, N, 3) -> (V, 3, 3)
+                cov_tensors = cp.matmul(centered.transpose(0, 2, 1), centered) / (v_counts[:, cp.newaxis, cp.newaxis] - 1)
+                
+                # Average the valid tensors and bring back to CPU for Eigendecomposition
+                avg_gyration_cpu = cp.mean(cov_tensors, axis=0).get()
+                
+                if np.any(np.isnan(avg_gyration_cpu)) or np.any(np.isinf(avg_gyration_cpu)):
+                    l1, l2, l3, anisotropy = 0.0, 0.0, 0.0, 0.0
+                else:
+                    try:
+                        eigenvalues, _ = np.linalg.eigh(avg_gyration_cpu)
+                        eigenvalues = np.sort(eigenvalues)[::-1]
+                        l1, l2, l3 = eigenvalues
+                        denom = (l1 + l2 + l3)**2
+                        if denom > 1e-9:
+                            anisotropy = 1 - 3 * (l1*l2 + l2*l3 + l3*l1) / denom
+                        else:
+                            anisotropy = 0.0
+                    except np.linalg.LinAlgError:
+                        l1, l2, l3, anisotropy = 0.0, 0.0, 0.0, 0.0
+            else:
+                l1, l2, l3, anisotropy = 0.0, 0.0, 0.0, 0.0
+
+            anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = anisotropy
+            anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = l1
+            anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = l2
+            anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = l3
+
+    if HAS_GPU:
+        cp.get_default_memory_pool().free_all_blocks()
+
+    return anisotropic_features
+
+def _calculate_anisotropic_glam_features_cpu(image_3d, num_levels, cutoff_radius):
+    """Fallback CPU function for anisotropic GLAM features."""
     anisotropic_features = {}
     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
     
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            
-            # --- FILL LOCATION 1: POPULATION CHECK ---
-            # If not enough points to measure, set to 0.0 (Isotropic) and skip
             if len(coords[alpha]) == 0 or len(coords[beta]) < 10: 
                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
@@ -968,7 +1459,6 @@ def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
                 continue
 
             num_ref_points = min(len(coords[alpha]), 50)
-            # Safety: Ensure we don't sample more than exists
             if len(coords[alpha]) < num_ref_points:
                  ref_indices = np.arange(len(coords[alpha]))
             else:
@@ -989,10 +1479,8 @@ def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
                 avg_gyration_tensor += gyration_tensor
                 valid_tensors += 1
             
-            # --- FILL LOCATION 2: VALID TENSOR CHECK ---
             if valid_tensors > 0:
                 avg_gyration_tensor /= valid_tensors
-                # Check for NaNs/Infs in the tensor before Eigendecomposition
                 if np.any(np.isnan(avg_gyration_tensor)) or np.any(np.isinf(avg_gyration_tensor)):
                      l1, l2, l3 = 0.0, 0.0, 0.0
                      anisotropy = 0.0
@@ -1017,39 +1505,109 @@ def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = l3
             
             else:
-                # If we found reference points but NO valid neighbors within radius
                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
 
-    # print("  - Anisotropic GLAM analysis complete.")
     return anisotropic_features
 
-def calculate_glam_fractal_dimension(image_3d, num_levels):
-    """Calculates Volume and Interface Fractal Dimensions using an optimized box-counting method."""
-    # print("  - Starting Fractal Dimension analysis...")
-    fractal_dimensions = {}
 
-    def boxcount(binary_image, max_box_size=32):
-        """Optimized helper function for box-counting algorithm using NumPy."""
-        # CHANGE 1: Return 0.0 instead of NaN for empty bins
-        if not np.any(binary_image): return 0.0
+# def calculate_glam_fractal_dimension(image_3d, num_levels):
+#     """Calculates Volume and Interface Fractal Dimensions using an optimized box-counting method."""
+#     # print("  - Starting Fractal Dimension analysis...")
+#     fractal_dimensions = {}
+
+#     def boxcount(binary_image, max_box_size=32):
+#         """Optimized helper function for box-counting algorithm using NumPy."""
+#         # CHANGE 1: Return 0.0 instead of NaN for empty bins
+#         if not np.any(binary_image): return 0.0
         
-        p = binary_image.shape
+#         p = binary_image.shape
+#         scales = np.logspace(np.log2(2), np.log2(min(p)), num=8, base=2.0, dtype=np.int32)
+#         scales = np.unique(scales[scales > 1])
+        
+#         # CHANGE 2: Return 0.0 if object is too small for scaling analysis
+#         if len(scales) < 2: return 0.0
+        
+#         counts = np.array([np.sum(ndimage.maximum_filter(binary_image, size=s, mode='constant')[::s, ::s, ::s]) for s in scales])
+        
+#         valid_indices = counts > 0
+#         # CHANGE 3: Return 0.0 if not enough points for regression
+#         if np.sum(valid_indices) < 2:
+#             return 0.0 
+            
+#         scales_fit = scales[valid_indices]
+#         counts_fit = counts[valid_indices]
+        
+#         try:
+#             with np.errstate(divide='ignore'): 
+#                 coeffs = np.polyfit(np.log(scales_fit), np.log(counts_fit), 1)
+#             return -coeffs[0]
+#         except np.linalg.LinAlgError:
+#             # CHANGE 4: Return 0.0 on math error
+#             return 0.0
+        
+#     for i in range(num_levels):
+#         binary_image = (image_3d == i)
+#         fractal_dimensions[f'GLAM_VolumeFD_{i}'] = boxcount(binary_image)
+
+#     for i in range(num_levels):
+#         for j in range(num_levels):
+
+#             if i == j: continue
+
+#             mask_i = (image_3d == i)
+#             mask_j = (image_3d == j)
+            
+#             # CHANGE 5: Explicitly set 0.0 if masks are empty, don't just skip
+#             # This ensures the matrix builder finds a value.
+#             if not np.any(mask_i) or not np.any(mask_j): 
+#                 fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
+#                 continue
+                
+#             interface = ndimage.binary_dilation(mask_i) & mask_j
+#             fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = boxcount(interface)
+
+#     # print("  - Fractal Dimension analysis complete.")
+#     return fractal_dimensions
+
+def calculate_glam_fractal_dimension(image_3d, num_levels):
+    """
+    Calculates Volume and Interface Fractal Dimensions.
+    GPU Accelerated using CuPy NDImage maximum_filter.
+    """
+    if not HAS_GPU:
+        return _calculate_glam_fractal_dimension_cpu(image_3d, num_levels)
+        
+    import cupyx.scipy.ndimage as cupy_ndimage
+    print("  - Starting Fractal Dimension analysis (GPU Accelerated)...")
+    fractal_dimensions = {}
+    
+    image_gpu = cp.array(image_3d, dtype=cp.int16)
+    masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
+    
+    def boxcount_gpu(binary_mask_gpu):
+        if not cp.any(binary_mask_gpu): return 0.0
+        
+        p = binary_mask_gpu.shape
         scales = np.logspace(np.log2(2), np.log2(min(p)), num=8, base=2.0, dtype=np.int32)
         scales = np.unique(scales[scales > 1])
         
-        # CHANGE 2: Return 0.0 if object is too small for scaling analysis
         if len(scales) < 2: return 0.0
         
-        counts = np.array([np.sum(ndimage.maximum_filter(binary_image, size=s, mode='constant')[::s, ::s, ::s]) for s in scales])
-        
-        valid_indices = counts > 0
-        # CHANGE 3: Return 0.0 if not enough points for regression
-        if np.sum(valid_indices) < 2:
-            return 0.0 
+        counts = []
+        for s in scales:
+            # 3D Max pooling natively on GPU
+            s = int(s)
+            filtered = cupy_ndimage.maximum_filter(binary_mask_gpu, size=s, mode='constant')
+            count = cp.sum(filtered[::s, ::s, ::s])
+            counts.append(float(count))
             
+        counts = np.array(counts)
+        valid_indices = counts > 0
+        if np.sum(valid_indices) < 2: return 0.0
+        
         scales_fit = scales[valid_indices]
         counts_fit = counts[valid_indices]
         
@@ -1058,7 +1616,55 @@ def calculate_glam_fractal_dimension(image_3d, num_levels):
                 coeffs = np.polyfit(np.log(scales_fit), np.log(counts_fit), 1)
             return -coeffs[0]
         except np.linalg.LinAlgError:
-            # CHANGE 4: Return 0.0 on math error
+            return 0.0
+
+    for i in range(num_levels):
+        fractal_dimensions[f'GLAM_VolumeFD_{i}'] = boxcount_gpu(masks_gpu[i])
+
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            for j in range(num_levels):
+                if i != j: fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
+            continue
+            
+        dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+        
+        for j in range(num_levels):
+            if i == j: continue
+            if not cp.any(masks_gpu[j]):
+                fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
+                continue
+                
+            interface_gpu = dilated_i_gpu & masks_gpu[j]
+            fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = boxcount_gpu(interface_gpu)
+
+    del image_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    
+    return fractal_dimensions
+
+def _calculate_glam_fractal_dimension_cpu(image_3d, num_levels):
+    """Fallback CPU function for Fractal Dimension."""
+    print("  - Starting Fractal Dimension analysis (CPU)...")
+    fractal_dimensions = {}
+
+    def boxcount(binary_image, max_box_size=32):
+        if not np.any(binary_image): return 0.0
+        p = binary_image.shape
+        scales = np.logspace(np.log2(2), np.log2(min(p)), num=8, base=2.0, dtype=np.int32)
+        scales = np.unique(scales[scales > 1])
+        if len(scales) < 2: return 0.0
+        counts = np.array([np.sum(ndimage.maximum_filter(binary_image, size=s, mode='constant')[::s, ::s, ::s]) for s in scales])
+        valid_indices = counts > 0
+        if np.sum(valid_indices) < 2: return 0.0 
+        scales_fit = scales[valid_indices]
+        counts_fit = counts[valid_indices]
+        try:
+            with np.errstate(divide='ignore'): 
+                coeffs = np.polyfit(np.log(scales_fit), np.log(counts_fit), 1)
+            return -coeffs[0]
+        except np.linalg.LinAlgError:
             return 0.0
         
     for i in range(num_levels):
@@ -1067,37 +1673,182 @@ def calculate_glam_fractal_dimension(image_3d, num_levels):
 
     for i in range(num_levels):
         for j in range(num_levels):
-
             if i == j: continue
-
             mask_i = (image_3d == i)
             mask_j = (image_3d == j)
-            
-            # CHANGE 5: Explicitly set 0.0 if masks are empty, don't just skip
-            # This ensures the matrix builder finds a value.
             if not np.any(mask_i) or not np.any(mask_j): 
                 fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
                 continue
-                
             interface = ndimage.binary_dilation(mask_i) & mask_j
             fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = boxcount(interface)
 
-    # print("  - Fractal Dimension analysis complete.")
     return fractal_dimensions
+
+
+# def calculate_glam_lacunarity(image_3d, num_levels):
+#     """
+#     Calculates Volume and Interface Lacunarity.
+#     UPDATED: Returns 1.0 (instead of NaN) for empty/invalid regions.
+#     This ensures that Log(Lacunarity) becomes 0.0, avoiding empty cells.
+#     """
+#     lacunarity_features = {}
+    
+#     # Define box sizes to average over. 
+#     box_sizes = [2, 3, 4, 5] 
+    
+#     def get_lacunarity_for_mask(binary_mask):
+#         # CHANGE 1: Return 1.0 (perfect homogeneity) if mask is too small
+#         if np.sum(binary_mask) < 10: return 1.0
+        
+#         float_mask = binary_mask.astype(float)
+#         lac_values = []
+        
+#         for r in box_sizes:
+#             kernel = np.ones((r, r, r))
+            
+#             try:
+#                 mass_map = ndimage.convolve(float_mask, kernel, mode='constant', cval=0.0)
+#                 valid_masses = mass_map[mass_map > 0]
+                
+#                 if valid_masses.size < 2: continue
+                
+#                 mean_mass = np.mean(valid_masses)
+#                 var_mass = np.var(valid_masses)
+                
+#                 if mean_mass == 0: continue
+                
+#                 # Standard Lacunarity Formula
+#                 lambda_r = (var_mass / (mean_mass**2)) + 1
+#                 lac_values.append(lambda_r)
+                
+#             except Exception:
+#                 continue
+
+#         # CHANGE 2: Return 1.0 if calculation failed
+#         if not lac_values: return 1.0
+#         return np.mean(lac_values)
+
+#     # 1. Diagonal: Volume Lacunarity (Single Gray Levels)
+#     for i in range(num_levels):
+#         binary_image = (image_3d == i)
+#         lacunarity_features[f'GLAM_VolumeLacunarity_{i}'] = get_lacunarity_for_mask(binary_image)
+
+#     # 2. Off-Diagonal: Interface Lacunarity (Pairwise Boundaries)
+#     for i in range(num_levels):
+#         for j in range(num_levels):
+
+#             if i == j: continue
+
+#             mask_i = (image_3d == i)
+#             mask_j = (image_3d == j)
+            
+#             # CHANGE 3: Return 1.0 if one of the masks is empty
+#             if not np.any(mask_i) or not np.any(mask_j): 
+#                 lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = 1.0
+#                 continue
+            
+#             interface = ndimage.binary_dilation(mask_i) & mask_j
+#             lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = get_lacunarity_for_mask(interface)
+
+#     return lacunarity_features
 
 def calculate_glam_lacunarity(image_3d, num_levels):
     """
     Calculates Volume and Interface Lacunarity.
-    UPDATED: Returns 1.0 (instead of NaN) for empty/invalid regions.
-    This ensures that Log(Lacunarity) becomes 0.0, avoiding empty cells.
+    GPU Accelerated using CuPy NDImage for ultrafast 3D convolutions and dilations.
     """
+    if not HAS_GPU:
+        return _calculate_glam_lacunarity_cpu(image_3d, num_levels)
+
+    # Import the GPU-accelerated equivalent of scipy.ndimage
+    import cupyx.scipy.ndimage as cupy_ndimage
+
+    print("  - Starting Lacunarity analysis (GPU Accelerated)...")
     lacunarity_features = {}
+    box_sizes = [2, 3, 4, 5]
     
-    # Define box sizes to average over. 
-    box_sizes = [2, 3, 4, 5] 
+    # 1. Move the entire image to the GPU once
+    image_gpu = cp.array(image_3d, dtype=cp.int16)
+
+    def get_lacunarity_for_mask_gpu(binary_mask_gpu):
+        if cp.sum(binary_mask_gpu) < 10: return 1.0
+        
+        float_mask_gpu = binary_mask_gpu.astype(cp.float32)
+        lac_values = []
+        
+        for r in box_sizes:
+            kernel_gpu = cp.ones((r, r, r), dtype=cp.float32)
+            try:
+                # Execute 3D Convolution natively on GPU
+                mass_map_gpu = cupy_ndimage.convolve(float_mask_gpu, kernel_gpu, mode='constant', cval=0.0)
+                
+                valid_mask_gpu = mass_map_gpu > 0
+                valid_masses_gpu = mass_map_gpu[valid_mask_gpu]
+                
+                if valid_masses_gpu.size < 2: continue
+                
+                # Calculate mean and variance simultaneously on GPU
+                mean_mass = cp.mean(valid_masses_gpu)
+                var_mass = cp.var(valid_masses_gpu)
+                
+                if mean_mass == 0: continue
+                
+                # Pull just the final scalar back to the CPU
+                lambda_r = float((var_mass / (mean_mass**2)) + 1)
+                lac_values.append(lambda_r)
+            except Exception:
+                continue
+                
+        if not lac_values: return 1.0
+        return float(np.mean(lac_values))
+
+    # 2. Pre-calculate all individual gray-level masks on the GPU
+    # This saves us from evaluating (image == i) repeatedly in the nested loops
+    masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
+
+    # A. Diagonal: Volume Lacunarity
+    for i in range(num_levels):
+        lacunarity_features[f'GLAM_VolumeLacunarity_{i}'] = get_lacunarity_for_mask_gpu(masks_gpu[i])
+
+    # B. Off-Diagonal: Interface Lacunarity
+    for i in range(num_levels):
+        # Only dilate if the base mask actually has points
+        if not cp.any(masks_gpu[i]):
+            for j in range(num_levels):
+                if i != j:
+                    lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = 1.0
+            continue
+            
+        # Execute 3D Binary Dilation on the GPU
+        dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+        
+        for j in range(num_levels):
+            if i == j: continue
+            
+            if not cp.any(masks_gpu[j]):
+                lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = 1.0
+                continue
+            
+            # Fast bitwise AND on the GPU
+            interface_gpu = dilated_i_gpu & masks_gpu[j]
+            lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = get_lacunarity_for_mask_gpu(interface_gpu)
+
+    # Free GPU Memory explicitly
+    del image_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+
+    return lacunarity_features
+
+def _calculate_glam_lacunarity_cpu(image_3d, num_levels):
+    """
+    Fallback CPU function for Volume and Interface Lacunarity.
+    """
+    print("  - Starting Lacunarity analysis (CPU)...")
+    lacunarity_features = {}
+    box_sizes = [2, 3, 4, 5]
     
     def get_lacunarity_for_mask(binary_mask):
-        # CHANGE 1: Return 1.0 (perfect homogeneity) if mask is too small
         if np.sum(binary_mask) < 10: return 1.0
         
         float_mask = binary_mask.astype(float)
@@ -1105,7 +1856,6 @@ def calculate_glam_lacunarity(image_3d, num_levels):
         
         for r in box_sizes:
             kernel = np.ones((r, r, r))
-            
             try:
                 mass_map = ndimage.convolve(float_mask, kernel, mode='constant', cval=0.0)
                 valid_masses = mass_map[mass_map > 0]
@@ -1117,32 +1867,26 @@ def calculate_glam_lacunarity(image_3d, num_levels):
                 
                 if mean_mass == 0: continue
                 
-                # Standard Lacunarity Formula
                 lambda_r = (var_mass / (mean_mass**2)) + 1
                 lac_values.append(lambda_r)
                 
             except Exception:
                 continue
 
-        # CHANGE 2: Return 1.0 if calculation failed
         if not lac_values: return 1.0
         return np.mean(lac_values)
 
-    # 1. Diagonal: Volume Lacunarity (Single Gray Levels)
     for i in range(num_levels):
         binary_image = (image_3d == i)
         lacunarity_features[f'GLAM_VolumeLacunarity_{i}'] = get_lacunarity_for_mask(binary_image)
 
-    # 2. Off-Diagonal: Interface Lacunarity (Pairwise Boundaries)
     for i in range(num_levels):
         for j in range(num_levels):
-
             if i == j: continue
 
             mask_i = (image_3d == i)
             mask_j = (image_3d == j)
             
-            # CHANGE 3: Return 1.0 if one of the masks is empty
             if not np.any(mask_i) or not np.any(mask_j): 
                 lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = 1.0
                 continue
@@ -1152,7 +1896,8 @@ def calculate_glam_lacunarity(image_3d, num_levels):
 
     return lacunarity_features
 
-def calculate_glam_topology(image_3d, num_levels):
+
+# def calculate_glam_topology(image_3d, num_levels):
     """
     Calculates Full Topological Metrics (Betti Numbers).
     Uses the Euler-Poincare formula: Chi = B0 - B1 + B2
@@ -1238,6 +1983,128 @@ def calculate_glam_topology(image_3d, num_levels):
             topology_features[f'GLAM_InterfaceEuler_{i}_{j}'] = chi
 
     return topology_features
+
+def calculate_glam_topology(image_3d, num_levels):
+    """
+    Calculates Full Topological Metrics (Betti Numbers).
+    Uses GPU Connected Component Labeling for massive speedups.
+    """
+    if not HAS_GPU: return _calculate_glam_topology_cpu(image_3d, num_levels)
+    import cupyx.scipy.ndimage as cupy_ndimage
+    from skimage import measure 
+    
+    print("  - Starting Topology analysis (GPU Accelerated)...")
+    topology_features = {}
+    image_gpu = cp.array(image_3d, dtype=cp.int16)
+    masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
+    
+    def get_betti_numbers_gpu(binary_mask_gpu):
+        padded_gpu = cp.pad(binary_mask_gpu, pad_width=1, mode='constant', constant_values=0)
+        
+        # Betti-0 (Objects)
+        structure_3d = cp.ones((3,3,3), dtype=cp.int32)
+        _, n_objects = cupy_ndimage.label(padded_gpu, structure=structure_3d)
+        b0 = float(n_objects)
+        
+        # Betti-2 (Voids)
+        background_gpu = (padded_gpu == 0)
+        structure_bg = cupy_ndimage.generate_binary_structure(3, 1)
+        _, n_bg_components = cupy_ndimage.label(background_gpu, structure=structure_bg)
+        b2 = max(0.0, float(n_bg_components) - 1.0)
+        
+        # Euler (Skimage CPU)
+        padded_cpu = padded_gpu.get()
+        chi = measure.euler_number(padded_cpu, connectivity=3)
+        b1 = max(0.0, b0 + b2 - chi)
+        return b0, b1, b2, float(chi)
+
+    # 1. Volume Topology
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            b0, b1, b2, chi = 0.0, 0.0, 0.0, 0.0
+        else:
+            b0, b1, b2, chi = get_betti_numbers_gpu(masks_gpu[i])
+            
+        topology_features[f'GLAM_VolumeBetti0_{i}'] = b0
+        topology_features[f'GLAM_VolumeBetti1_{i}'] = b1
+        topology_features[f'GLAM_VolumeBetti2_{i}'] = b2
+        topology_features[f'GLAM_VolumeEuler_{i}'] = chi
+
+    # 2. Interface Topology
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            for j in range(num_levels):
+                if i != j:
+                    topology_features[f'GLAM_InterfaceBetti0_{i}_{j}'] = 0.0
+                    topology_features[f'GLAM_InterfaceBetti1_{i}_{j}'] = 0.0
+                    topology_features[f'GLAM_InterfaceBetti2_{i}_{j}'] = 0.0
+                    topology_features[f'GLAM_InterfaceEuler_{i}_{j}'] = 0.0
+            continue
+            
+        dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+        for j in range(num_levels):
+            if i == j: continue
+            if not cp.any(masks_gpu[j]):
+                b0, b1, b2, chi = 0.0, 0.0, 0.0, 0.0
+            else:
+                interface_gpu = dilated_i_gpu & masks_gpu[j]
+                if not cp.any(interface_gpu):
+                    b0, b1, b2, chi = 0.0, 0.0, 0.0, 0.0
+                else:
+                    b0, b1, b2, chi = get_betti_numbers_gpu(interface_gpu)
+            
+            topology_features[f'GLAM_InterfaceBetti0_{i}_{j}'] = b0
+            topology_features[f'GLAM_InterfaceBetti1_{i}_{j}'] = b1
+            topology_features[f'GLAM_InterfaceBetti2_{i}_{j}'] = b2
+            topology_features[f'GLAM_InterfaceEuler_{i}_{j}'] = chi
+            
+    # Cleanup
+    del image_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    return topology_features
+
+def _calculate_glam_topology_cpu(image_3d, num_levels):
+    """Fallback CPU function for Topology."""
+    topology_features = {}
+    def get_betti_numbers(binary_mask):
+        padded = np.pad(binary_mask, pad_width=1, mode='constant', constant_values=0)
+        labeled_obj, n_objects = ndimage.label(padded, structure=np.ones((3,3,3)))
+        b0 = float(n_objects)
+        background = (padded == 0)
+        structure_bg = ndimage.generate_binary_structure(3, 1)
+        labeled_bg, n_bg_components = ndimage.label(background, structure=structure_bg)
+        b2 = max(0.0, float(n_bg_components) - 1.0)
+        chi = measure.euler_number(padded, connectivity=3)
+        b1 = max(0.0, b0 + b2 - chi)
+        return b0, b1, b2, float(chi)
+
+    for i in range(num_levels):
+        binary_image = (image_3d == i)
+        if np.sum(binary_image) == 0: b0, b1, b2, chi = 0.0, 0.0, 0.0, 0.0
+        else: b0, b1, b2, chi = get_betti_numbers(binary_image)
+        topology_features[f'GLAM_VolumeBetti0_{i}'] = b0
+        topology_features[f'GLAM_VolumeBetti1_{i}'] = b1
+        topology_features[f'GLAM_VolumeBetti2_{i}'] = b2
+        topology_features[f'GLAM_VolumeEuler_{i}'] = chi
+
+    for i in range(num_levels):
+        for j in range(num_levels):
+            if i == j: continue
+            mask_i = (image_3d == i)
+            mask_j = (image_3d == j)
+            if not np.any(mask_i) or not np.any(mask_j):
+                b0, b1, b2, chi = 0.0, 0.0, 0.0, 0.0
+                continue
+            interface = ndimage.binary_dilation(mask_i) & mask_j
+            if np.sum(interface) == 0: b0, b1, b2, chi = 0.0, 0.0, 0.0, 0.0
+            else: b0, b1, b2, chi = get_betti_numbers(interface)
+            topology_features[f'GLAM_InterfaceBetti0_{i}_{j}'] = b0
+            topology_features[f'GLAM_InterfaceBetti1_{i}_{j}'] = b1
+            topology_features[f'GLAM_InterfaceBetti2_{i}_{j}'] = b2
+            topology_features[f'GLAM_InterfaceEuler_{i}_{j}'] = chi
+    return topology_features
+
 
 def calculate_glam_potential_energy(rdf_df, num_levels):
     """Calculates the Potential of Mean Force (PMF) Energy (U*) and contributions."""
@@ -1428,9 +2295,143 @@ def calculate_nematic_order_per_gray_level(image_array, mask_array, quantized_im
     print("  - Nematic Order Parameter analysis (Per Gray Level) complete.")
     return nematic_features
 
+
+# def calculate_local_nematic_alignment(image_array, mask_array, cutoff_radius):
+#     """Calculates the average alignment of local directors."""
+#     print("  - Starting Local Nematic Alignment analysis...")
+#     roi_coords = np.argwhere(mask_array > 0)
+#     if len(roi_coords) < 50: return {}
+
+#     grad = np.array(np.gradient(image_array.astype(float)))
+#     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
+#     tree = cKDTree(roi_coords)
+#     num_ref_points = min(len(roi_coords), 200)
+#     ref_indices = np.random.choice(len(roi_coords), num_ref_points, replace=False)
+    
+#     local_directors = {}
+#     for i in ref_indices:
+#         ref_point = roi_coords[i]
+#         neighbor_indices = tree.query_ball_point(ref_point, r=cutoff_radius)
+#         if len(neighbor_indices) < 10: continue
+#         local_grad_vectors = grad_vectors[neighbor_indices]
+#         norms = np.linalg.norm(local_grad_vectors, axis=1)
+#         valid = norms > 1e-6
+#         if np.sum(valid) < 10: continue
+#         local_unit_vectors = local_grad_vectors[valid] / norms[valid, np.newaxis]
+#         Q_local = np.mean([np.outer(n, n) for n in local_unit_vectors], axis=0) - (1/3) * np.identity(3)
+#         eigenvalues, eigenvectors = np.linalg.eigh(Q_local)
+#         local_directors[tuple(ref_point)] = eigenvectors[:, np.argmax(eigenvalues)]
+
+#     if len(local_directors) < 2: return {}
+
+#     director_coords = np.array(list(local_directors.keys()))
+#     director_vectors = np.array(list(local_directors.values()))
+#     director_tree = cKDTree(director_coords)
+    
+#     alignments = []
+#     for i, coord in enumerate(director_coords):
+#         dist, idx = director_tree.query(coord, k=2)
+#         if len(idx) > 1:
+#             alignments.append(np.dot(director_vectors[i], director_vectors[idx[1]])**2)
+
+#     if not alignments: return {}
+#     print("  - Local Nematic Alignment analysis complete.")
+#     return {'GLAM.LocalNematic.Alignment': np.mean(alignments)}
+
 def calculate_local_nematic_alignment(image_array, mask_array, cutoff_radius):
-    """Calculates the average alignment of local directors."""
-    print("  - Starting Local Nematic Alignment analysis...")
+    """
+    Calculates the average alignment of local directors.
+    GPU Accelerated using batched CuPy tensor operations and eigendecomposition.
+    """
+    if not HAS_GPU:
+        return _calculate_local_nematic_alignment_cpu(image_array, mask_array, cutoff_radius)
+
+    print("  - Starting Local Nematic Alignment analysis (GPU)...")
+    roi_coords = np.argwhere(mask_array > 0)
+    if len(roi_coords) < 50: return {}
+
+    # Calculate Gradients on CPU (Fast enough via NumPy)
+    grad = np.array(np.gradient(image_array.astype(float)))
+    grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
+    
+    num_ref_points = min(len(roi_coords), 200)
+    ref_indices = np.random.choice(len(roi_coords), num_ref_points, replace=False)
+    
+    # Move to GPU
+    coords_gpu = cp.array(roi_coords, dtype=cp.float32)
+    vectors_gpu = cp.array(grad_vectors, dtype=cp.float32)
+    
+    # Pre-calculate norms and unit vectors on GPU
+    norms_gpu = cp.linalg.norm(vectors_gpu, axis=1)
+    valid_mask = norms_gpu > 1e-6
+    
+    unit_vectors_gpu = cp.zeros_like(vectors_gpu)
+    unit_vectors_gpu[valid_mask] = vectors_gpu[valid_mask] / norms_gpu[valid_mask, cp.newaxis]
+    
+    cutoff_sq = cutoff_radius ** 2
+    I3 = cp.eye(3, dtype=cp.float32) / 3.0
+    
+    valid_q_tensors = []
+    valid_ref_coords = []
+    
+    # Loop over the sampled reference points
+    for i in ref_indices:
+        ref_point = coords_gpu[i]
+        
+        # Broadcast Euclidean squared distance
+        dist_sq = cp.sum((coords_gpu - ref_point)**2, axis=1)
+        neighbor_mask = (dist_sq < cutoff_sq) & valid_mask
+        
+        if cp.sum(neighbor_mask) < 10: 
+            continue
+            
+        local_unit_vecs = unit_vectors_gpu[neighbor_mask]
+        
+        # Vectorized outer product: (N, 3, 1) * (N, 1, 3) -> (N, 3, 3)
+        outer_prods = local_unit_vecs[:, :, cp.newaxis] * local_unit_vecs[:, cp.newaxis, :]
+        Q_local = cp.mean(outer_prods, axis=0) - I3
+        
+        valid_q_tensors.append(Q_local)
+        valid_ref_coords.append(roi_coords[i]) # Keep original CPU coordinate for KDTree
+        
+    if len(valid_q_tensors) < 2:
+        return {}
+        
+    # --- BATCHED EIGENDECOMPOSITION ---
+    # Stack Q-tensors into a single array of shape (Batch, 3, 3)
+    Q_batch = cp.stack(valid_q_tensors)
+    
+    # Solve eigenvalues and eigenvectors for ALL points simultaneously
+    eigenvalues, eigenvectors = cp.linalg.eigh(Q_batch)
+    
+    # eigh returns ascending eigenvalues. The principal eigenvector (max eigenvalue)
+    # is the 3rd column (index 2) for all batches.
+    principal_eigenvectors = eigenvectors[:, :, 2].get()
+    director_coords = np.array(valid_ref_coords)
+    
+    # Clean up GPU memory
+    cp.get_default_memory_pool().free_all_blocks()
+    
+    # --- CPU KD-Tree for Final Alignment ---
+    # cKDTree is virtually instantaneous for < 200 points
+    director_tree = cKDTree(director_coords)
+    
+    alignments = []
+    for i, coord in enumerate(director_coords):
+        # Find the 2 nearest neighbors (k=2 returns the point itself + 1 nearest neighbor)
+        dist, idx = director_tree.query(coord, k=2)
+        if len(idx) > 1:
+            alignments.append(np.dot(principal_eigenvectors[i], principal_eigenvectors[idx[1]])**2)
+
+    if not alignments: return {}
+    print("  - Local Nematic Alignment analysis complete.")
+    return {'GLAM.LocalNematic.Alignment': np.mean(alignments)}
+
+def _calculate_local_nematic_alignment_cpu(image_array, mask_array, cutoff_radius):
+    """
+    Fallback CPU function for local nematic alignment.
+    """
+    print("  - Starting Local Nematic Alignment analysis (CPU)...")
     roi_coords = np.argwhere(mask_array > 0)
     if len(roi_coords) < 50: return {}
 
@@ -1470,15 +2471,53 @@ def calculate_local_nematic_alignment(image_array, mask_array, cutoff_radius):
     print("  - Local Nematic Alignment analysis complete.")
     return {'GLAM.LocalNematic.Alignment': np.mean(alignments)}
 
+
 def calculate_stress_features(image_array, mask_array):
-    """Calculates Stress analogues for the volume and surface of the ROI."""
-    print("  - Starting Stress analysis...")
+    """Calculates Stress analogues using GPU Accelerated 3D Laplacian filters."""
+    if not HAS_GPU:
+        return _calculate_stress_features_cpu(image_array, mask_array)
+        
+    import cupyx.scipy.ndimage as cupy_ndimage
+    
+    print("  - Starting Stress analysis (GPU Accelerated)...")
+    stress_features = {}
+    if np.sum(mask_array) < 10: return {}
+    
+    # Move raw float data to GPU
+    image_gpu = cp.array(image_array, dtype=cp.float32)
+    mask_gpu = cp.array(mask_array) > 0
+    
+    # Calculate massive 3D Laplacian instantly on GPU
+    laplacian_gpu = cupy_ndimage.laplace(image_gpu)
+    
+    roi_laplacian = laplacian_gpu[mask_gpu]
+    stress_features['GLAM.Stress.VolumetricLaplacianMean'] = float(cp.mean(cp.abs(roi_laplacian)))
+    stress_features['GLAM.Stress.VolumetricLaplacianVariance'] = float(cp.var(cp.abs(roi_laplacian)))
+
+    dilated_mask = cupy_ndimage.binary_dilation(mask_gpu)
+    surface_mask = dilated_mask & ~mask_gpu 
+    
+    if cp.any(surface_mask): 
+        surface_laplacian = laplacian_gpu[surface_mask]
+        stress_features['GLAM.Stress.SurfaceLaplacianMean'] = float(cp.mean(cp.abs(surface_laplacian)))
+        stress_features['GLAM.Stress.SurfaceLaplacianVariance'] = float(cp.var(cp.abs(surface_laplacian)))
+    else:
+        stress_features['GLAM.Stress.SurfaceLaplacianMean'] = np.nan
+        stress_features['GLAM.Stress.SurfaceLaplacianVariance'] = np.nan
+        
+    # Clean up massive float arrays
+    del image_gpu, mask_gpu, laplacian_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    
+    return stress_features
+
+def _calculate_stress_features_cpu(image_array, mask_array):
+    """Fallback CPU function for Stress analysis."""
+    print("  - Starting Stress analysis (CPU)...")
     stress_features = {}
     if np.sum(mask_array) < 10: return {}
     
     laplacian = ndimage.laplace(image_array.astype(float))
-    
-    # Volumetric Stress
     roi_laplacian = laplacian[mask_array > 0]
     stress_features['GLAM.Stress.VolumetricLaplacianMean'] = np.mean(np.abs(roi_laplacian))
     stress_features['GLAM.Stress.VolumetricLaplacianVariance'] = np.var(np.abs(roi_laplacian))
@@ -1494,68 +2533,256 @@ def calculate_stress_features(image_array, mask_array):
     else:
         stress_features['GLAM.Stress.SurfaceLaplacianMean'] = np.nan
         stress_features['GLAM.Stress.SurfaceLaplacianVariance'] = np.nan
-    
-    print("  - Stress analysis complete.")
+        
     return stress_features
 
+
+# def calculate_orientational_correlation_length(image_array, mask_array, max_radius):
+#     """Calculates the Orientational Correlation Length from the g2(r) function.
+#        (Memory-efficient version)
+#     """
+#     print("  - Starting Orientational Correlation analysis...")
+#     if np.sum(mask_array) < 50: return {}
+#     grad = np.array(np.gradient(image_array.astype(float)))
+#     roi_coords = np.argwhere(mask_array > 0)
+#     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
+#     norms = np.linalg.norm(grad_vectors, axis=1)
+#     valid_indices = norms > 1e-6
+#     if np.sum(valid_indices) < 50: return {}
+#     coords, vectors = roi_coords[valid_indices], grad_vectors[valid_indices] / norms[valid_indices, np.newaxis]
+#     tree = cKDTree(coords)
+#     num_ref_points = min(len(coords), 500) # You can also reduce this 500 to e.g. 200
+#     ref_indices = np.random.choice(len(coords), num_ref_points, replace=False)
+
+#     # --- NEW: Pre-allocate bins ---
+#     # We will add to these bins instead of creating huge lists
+#     g2_r_bins = np.zeros(max_radius, dtype=np.float64)
+#     bin_counts = np.zeros(max_radius, dtype=np.int64)
+#     # ---
+
+#     for i in ref_indices:
+#         ref_point, ref_vector = coords[i], vectors[i]
+#         neighbor_indices = tree.query_ball_point(ref_point, r=max_radius)
+#         if len(neighbor_indices) < 2: continue
+        
+#         neighbor_coords = coords[neighbor_indices]
+#         neighbor_vectors = vectors[neighbor_indices]
+        
+#         distances = np.linalg.norm(neighbor_coords - ref_point, axis=1)
+#         valid_dist = distances > 1e-6
+#         if not np.any(valid_dist): continue
+        
+#         # Get distances and dot products for valid neighbors
+#         distances = distances[valid_dist]
+#         dot_products = np.dot(neighbor_vectors[valid_dist], ref_vector)
+#         p2_values = 0.5 * (3 * dot_products**2 - 1)
+        
+#         # --- NEW: Binning inside the loop ---
+#         # Get bin index (0 for r=1, 1 for r=2, etc.)
+#         bin_indices = np.floor(distances).astype(int) - 1
+        
+#         # Filter out any bins that are out of range (e.g., r=0 or r > max_radius)
+#         valid_bins = (bin_indices >= 0) & (bin_indices < max_radius)
+#         if not np.any(valid_bins): continue
+        
+#         bin_indices = bin_indices[valid_bins]
+#         p2_values = p2_values[valid_bins]
+        
+#         # Add values to their respective bins atomically
+#         # This is the memory-efficient equivalent of binned_statistic
+#         np.add.at(g2_r_bins, bin_indices, p2_values)
+#         np.add.at(bin_counts, bin_indices, 1)
+#         # ---
+        
+#     # Calculate the average g2(r) for bins that have data
+#     valid_g2_bins = bin_counts > 0
+#     g2_r = np.full(max_radius, np.nan)
+#     g2_r[valid_g2_bins] = g2_r_bins[valid_g2_bins] / bin_counts[valid_g2_bins]
+    
+#     r_vals = np.arange(1, max_radius + 1)
+#     valid_g2 = ~np.isnan(g2_r)
+    
+#     if np.sum(valid_g2) < 3: return {'GLAM.OrientationalCorrLength': np.nan}
+    
+#     def exp_decay(r, A, xi): return A * np.exp(-r / xi)
+#     try:
+#         # Fit the decay curve
+#         popt, _ = curve_fit(exp_decay, r_vals[valid_g2], g2_r[valid_g2], p0=[g2_r[valid_g2][0], 5.0], maxfev=5000)
+#         corr_length = popt[1] if popt[1] > 0 else np.nan
+#     except (RuntimeError, ValueError): 
+#         corr_length = np.nan
+        
+#     print("  - Orientational Correlation analysis complete.")
+#     return {'GLAM.OrientationalCorrLength': corr_length}
+
 def calculate_orientational_correlation_length(image_array, mask_array, max_radius):
-    """Calculates the Orientational Correlation Length from the g2(r) function.
-       (Memory-efficient version)
     """
-    print("  - Starting Orientational Correlation analysis...")
+    Calculates the Orientational Correlation Length from the g2(r) function.
+    Automatically detects CUDA availability and scales memory batching.
+    Uses pure cuBLAS matrix math for massive speedups.
+    """
+    if not HAS_GPU:
+        print("  > DEBUG: No GPU detected. Falling back to CPU Orientational Correlation.")
+        return _calculate_orientational_correlation_length_cpu(image_array, mask_array, max_radius)
+
+    print("  - Starting Orientational Correlation analysis (GPU Batched)...")
     if np.sum(mask_array) < 50: return {}
+    
+    # 1. Calculate Gradients on CPU (Fast enough via NumPy)
     grad = np.array(np.gradient(image_array.astype(float)))
     roi_coords = np.argwhere(mask_array > 0)
     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
     norms = np.linalg.norm(grad_vectors, axis=1)
+    
     valid_indices = norms > 1e-6
     if np.sum(valid_indices) < 50: return {}
+    
+    coords = roi_coords[valid_indices]
+    vectors = grad_vectors[valid_indices] / norms[valid_indices, np.newaxis]
+
+    # Sample reference points
+    num_ref_points = min(len(coords), 500)
+    ref_indices = np.random.choice(len(coords), num_ref_points, replace=False)
+    
+    # 2. Move active data to GPU
+    coords_gpu = cp.array(coords, dtype=cp.float32)
+    vectors_gpu = cp.array(vectors, dtype=cp.float32)
+    
+    ref_coords_gpu = coords_gpu[ref_indices]
+    ref_vectors_gpu = vectors_gpu[ref_indices]
+
+    # 3. Dynamic GPU Memory Batching
+    dev = cp.cuda.Device(0)
+    free_mem, _ = dev.mem_info
+    safe_vram_bytes = free_mem * 0.5 
+    
+    num_targets = coords_gpu.shape[0]
+    # We create 3 matrices per batch: dist_sq, dot_prods, valid_mask (4 bytes each)
+    bytes_per_ref = num_targets * 12 
+    
+    batch_size = int(safe_vram_bytes // bytes_per_ref)
+    batch_size = max(1, min(batch_size, num_ref_points))
+
+    g2_r_bins = cp.zeros(max_radius, dtype=cp.float64)
+    bin_counts = cp.zeros(max_radius, dtype=cp.int64)
+
+    # Pre-calculate target squared norms for Euclidean distances
+    B_sq = cp.sum(coords_gpu**2, axis=1)
+
+    for i in range(0, num_ref_points, batch_size):
+        batch_coords = ref_coords_gpu[i : i + batch_size]
+        batch_vecs = ref_vectors_gpu[i : i + batch_size]
+        
+        # --- GPU Euclidean Distance ---
+        A_sq = cp.sum(batch_coords**2, axis=1, keepdims=True)
+        AB = cp.matmul(batch_coords, coords_gpu.T)
+        dist_sq = A_sq + B_sq - 2.0 * AB
+        dists = cp.sqrt(cp.maximum(dist_sq, 0.0))
+        
+        # --- GPU Dot Products (Angles) ---
+        dot_prods = cp.matmul(batch_vecs, vectors_gpu.T)
+        
+        # Filter valid neighbors
+        valid_mask = (dists > 1e-6) & (dists <= max_radius + 0.99)
+        valid_dists = dists[valid_mask]
+        valid_dots = dot_prods[valid_mask]
+        
+        if valid_dists.size > 0:
+            # Legendre Polynomial P2(cos theta)
+            p2_vals = 0.5 * (3 * valid_dots**2 - 1)
+            
+            # Bin distances (dist=1 -> bin=0)
+            bins = cp.floor(valid_dists).astype(cp.int32) - 1
+            
+            # Ensure bins are within valid range
+            valid_bin_mask = (bins >= 0) & (bins < max_radius)
+            bins = bins[valid_bin_mask]
+            p2_vals = p2_vals[valid_bin_mask]
+            
+            if bins.size > 0:
+                # Accumulate sums and counts using fast batched bincount
+                batch_g2 = cp.bincount(bins, weights=p2_vals, minlength=max_radius)
+                batch_counts = cp.bincount(bins, minlength=max_radius)
+                
+                g2_r_bins += batch_g2[:max_radius]
+                bin_counts += batch_counts[:max_radius]
+
+    # Free memory block
+    cp.get_default_memory_pool().free_all_blocks()
+
+    # 4. Bring results back to CPU for curve fitting
+    g2_r_bins_cpu = g2_r_bins.get()
+    bin_counts_cpu = bin_counts.get()
+
+    valid_g2_bins = bin_counts_cpu > 0
+    g2_r = np.full(max_radius, np.nan)
+    g2_r[valid_g2_bins] = g2_r_bins_cpu[valid_g2_bins] / bin_counts_cpu[valid_g2_bins]
+    
+    r_vals = np.arange(1, max_radius + 1)
+    valid_g2 = ~np.isnan(g2_r)
+    
+    if np.sum(valid_g2) < 3: return {'GLAM.OrientationalCorrLength': np.nan}
+    
+    def exp_decay(r, A, xi): return A * np.exp(-r / xi)
+    
+    try:
+        popt, _ = curve_fit(exp_decay, r_vals[valid_g2], g2_r[valid_g2], p0=[g2_r[valid_g2][0], 5.0], maxfev=5000)
+        corr_length = popt[1] if popt[1] > 0 else np.nan
+    except (RuntimeError, ValueError): 
+        corr_length = np.nan
+        
+    print("  - Orientational Correlation analysis complete.")
+    return {'GLAM.OrientationalCorrLength': corr_length}
+
+def _calculate_orientational_correlation_length_cpu(image_array, mask_array, max_radius):
+    """
+    Fallback CPU function using SciPy cKDTree.
+    """
+    print("  - Starting Orientational Correlation analysis (CPU)...")
+    if np.sum(mask_array) < 50: return {}
+    
+    grad = np.array(np.gradient(image_array.astype(float)))
+    roi_coords = np.argwhere(mask_array > 0)
+    grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
+    norms = np.linalg.norm(grad_vectors, axis=1)
+    
+    valid_indices = norms > 1e-6
+    if np.sum(valid_indices) < 50: return {}
+    
     coords, vectors = roi_coords[valid_indices], grad_vectors[valid_indices] / norms[valid_indices, np.newaxis]
     tree = cKDTree(coords)
-    num_ref_points = min(len(coords), 500) # You can also reduce this 500 to e.g. 200
+    num_ref_points = min(len(coords), 500)
     ref_indices = np.random.choice(len(coords), num_ref_points, replace=False)
 
-    # --- NEW: Pre-allocate bins ---
-    # We will add to these bins instead of creating huge lists
     g2_r_bins = np.zeros(max_radius, dtype=np.float64)
     bin_counts = np.zeros(max_radius, dtype=np.int64)
-    # ---
 
     for i in ref_indices:
         ref_point, ref_vector = coords[i], vectors[i]
-        neighbor_indices = tree.query_ball_point(ref_point, r=max_radius)
+        neighbor_indices = tree.query_ball_point(ref_point, r=max_radius + 0.99)
         if len(neighbor_indices) < 2: continue
         
         neighbor_coords = coords[neighbor_indices]
         neighbor_vectors = vectors[neighbor_indices]
         
         distances = np.linalg.norm(neighbor_coords - ref_point, axis=1)
-        valid_dist = distances > 1e-6
+        valid_dist = (distances > 1e-6) & (distances <= max_radius + 0.99)
         if not np.any(valid_dist): continue
         
-        # Get distances and dot products for valid neighbors
         distances = distances[valid_dist]
         dot_products = np.dot(neighbor_vectors[valid_dist], ref_vector)
         p2_values = 0.5 * (3 * dot_products**2 - 1)
         
-        # --- NEW: Binning inside the loop ---
-        # Get bin index (0 for r=1, 1 for r=2, etc.)
         bin_indices = np.floor(distances).astype(int) - 1
-        
-        # Filter out any bins that are out of range (e.g., r=0 or r > max_radius)
         valid_bins = (bin_indices >= 0) & (bin_indices < max_radius)
         if not np.any(valid_bins): continue
         
         bin_indices = bin_indices[valid_bins]
         p2_values = p2_values[valid_bins]
         
-        # Add values to their respective bins atomically
-        # This is the memory-efficient equivalent of binned_statistic
         np.add.at(g2_r_bins, bin_indices, p2_values)
         np.add.at(bin_counts, bin_indices, 1)
-        # ---
         
-    # Calculate the average g2(r) for bins that have data
     valid_g2_bins = bin_counts > 0
     g2_r = np.full(max_radius, np.nan)
     g2_r[valid_g2_bins] = g2_r_bins[valid_g2_bins] / bin_counts[valid_g2_bins]
@@ -1567,7 +2794,6 @@ def calculate_orientational_correlation_length(image_array, mask_array, max_radi
     
     def exp_decay(r, A, xi): return A * np.exp(-r / xi)
     try:
-        # Fit the decay curve
         popt, _ = curve_fit(exp_decay, r_vals[valid_g2], g2_r[valid_g2], p0=[g2_r[valid_g2][0], 5.0], maxfev=5000)
         corr_length = popt[1] if popt[1] > 0 else np.nan
     except (RuntimeError, ValueError): 
@@ -1575,6 +2801,7 @@ def calculate_orientational_correlation_length(image_array, mask_array, max_radi
         
     print("  - Orientational Correlation analysis complete.")
     return {'GLAM.OrientationalCorrLength': corr_length}
+
 
 def calculate_rdf_shape_matrices(rdf_df, num_levels):
     """
@@ -2028,17 +3255,294 @@ def calculate_profile_shape_features(matrix, feature_prefix):
 
     return features
 
+
+# def calculate_glam_multifractal_spectrum(image_3d, num_levels):
+#     """
+#     Calculates the Multifractal Spectrum (f(alpha) vs alpha) and Generalized Dimensions (D_q).
+#     Uses the Method of Moments (Partition Function).
+#     """
+#     multifractal_features = {}
+    
+#     # Define moments q to scan
+#     q_values = np.array([-5, -2, 0, 1, 2, 5]) 
+    
+#     # Box sizes for scaling analysis
+#     box_sizes = [2, 3, 4, 6, 8, 12, 16]
+    
+#     def get_multifractal_spectrum(binary_mask):
+#         if np.sum(binary_mask) < 50: 
+#             return {f"D_q_{q}": 0.0 for q in q_values} | {"Width": 0.0, "Alpha_0": 0.0}
+
+#         pixels = np.argwhere(binary_mask > 0)
+#         N = len(pixels)
+        
+#         # Partition function Z(q, epsilon)
+#         Z = defaultdict(list)
+        
+#         # Track which sizes actually got processed
+#         processed_sizes = []
+#         results = {}
+
+#         for eps in box_sizes:
+#             if eps >= min(binary_mask.shape): continue
+            
+#             processed_sizes.append(eps)
+            
+#             box_indices = np.floor(pixels / eps).astype(int)
+#             _, counts = np.unique(box_indices, axis=0, return_counts=True)
+#             p = counts / N
+            
+#             for q in q_values:
+#                 if q == 1:
+#                     # Shannon Entropy for q=1 (limit q->1)
+#                     sum_val = np.sum(p * np.log(p + 1e-12))
+#                 else:
+#                     sum_val = np.sum(p ** q)
+                
+#                 Z[q].append(sum_val)
+
+#         # Safety Check: Did we get enough scales for a regression?
+#         if len(processed_sizes) < 3:
+#              return {f"D_q_{q}": 0.0 for q in q_values} | {"Width": 0.0, "Alpha_0": 0.0}
+             
+#         # X-axis: log(epsilon)
+#         x_all = np.log(np.array(processed_sizes))
+        
+#         tau_q = {}
+        
+#         for q in q_values:
+#             # Y-axis: log(Z(q, epsilon))
+#             # Z[q] corresponds 1-to-1 with processed_sizes
+#             z_values = np.array(Z[q])
+            
+#             # --- CRITICAL FIX: Mask invalid values before Log ---
+#             # Remove NaNs, Infs, and Zeros (which cause log errors)
+#             mask = (z_values > 1e-20) & np.isfinite(z_values)
+            
+#             if np.sum(mask) < 3:
+#                 tau_q[q] = 0.0
+#                 results[f"D_q_{q}"] = 0.0
+#                 continue
+                
+#             y_clean = np.log(z_values[mask])
+#             x_clean = x_all[mask]
+            
+#             # Perform Regression
+#             slope, _, _, _, _ = stats.linregress(x_clean, y_clean)
+            
+#             tau = slope
+#             tau_q[q] = tau
+            
+#             # Calculate D_q
+#             if q == 1:
+#                 results[f"D_q_{q}"] = tau 
+#             elif q != 1:
+#                 results[f"D_q_{q}"] = tau / (q - 1)
+        
+#         # Calculate Alpha and f(Alpha) via finite difference
+#         alphas = []
+#         q_sorted = sorted(q_values)
+#         for i in range(len(q_sorted)-1):
+#             q1, q2 = q_sorted[i], q_sorted[i+1]
+#             t1, t2 = tau_q[q1], tau_q[q2]
+            
+#             # Numerical derivative d(tau)/dq
+#             if (q2 - q1) != 0:
+#                 alpha = (t2 - t1) / (q2 - q1)
+#                 alphas.append(alpha)
+            
+#         if alphas:
+#             results["Width"] = max(alphas) - min(alphas)
+#             results["Alpha_0"] = np.mean(alphas)
+#         else:
+#             results["Width"] = 0.0
+#             results["Alpha_0"] = 0.0
+            
+#         return results
+
+#     # Initialize results container - FIX: Define 'results' here so it resets per loop iteration logic in your original structure?
+#     # Actually, the original code had 'results = {}' INSIDE the helper. 
+#     # But here we need to loop over levels.
+    
+#     # 1. Diagonal: Volume Multifractality
+#     for i in range(num_levels):
+#         binary_image = (image_3d == i)
+        
+#         mf_res = get_multifractal_spectrum(binary_image)
+        
+#         multifractal_features[f'GLAM_VolumeMultifractal_Width_{i}'] = mf_res["Width"]
+#         multifractal_features[f'GLAM_VolumeMultifractal_Alpha0_{i}'] = mf_res["Alpha_0"]
+#         multifractal_features[f'GLAM_VolumeMultifractal_D2_{i}'] = mf_res.get("D_q_2", 0.0)
+
+#     # 2. Off-Diagonal: Interface Multifractality
+#     for i in range(num_levels):
+#         for j in range(num_levels):
+#             if i == j: continue
+            
+#             mask_i = (image_3d == i)
+#             mask_j = (image_3d == j)
+            
+#             if not np.any(mask_i) or not np.any(mask_j):
+#                 val_width, val_alpha, val_d2 = 0.0, 0.0, 0.0
+#             else:
+#                 interface = ndimage.binary_dilation(mask_i) & mask_j
+#                 if np.sum(interface) < 50:
+#                     val_width, val_alpha, val_d2 = 0.0, 0.0, 0.0
+#                 else:
+#                     mf_res = get_multifractal_spectrum(interface)
+#                     val_width = mf_res["Width"]
+#                     val_alpha = mf_res["Alpha_0"]
+#                     val_d2 = mf_res.get("D_q_2", 0.0)
+            
+#             multifractal_features[f'GLAM_InterfaceMultifractal_Width_{i}_{j}'] = val_width
+#             multifractal_features[f'GLAM_InterfaceMultifractal_Alpha0_{i}_{j}'] = val_alpha
+#             multifractal_features[f'GLAM_InterfaceMultifractal_D2_{i}_{j}'] = val_d2
+
+#     return multifractal_features
+
 def calculate_glam_multifractal_spectrum(image_3d, num_levels):
     """
-    Calculates the Multifractal Spectrum (f(alpha) vs alpha) and Generalized Dimensions (D_q).
-    Uses the Method of Moments (Partition Function).
+    Calculates the Multifractal Spectrum.
+    GPU Accelerated using CuPy and flat-index 3D block counting.
     """
+    if not HAS_GPU:
+        return _calculate_glam_multifractal_spectrum_cpu(image_3d, num_levels)
+
+    import cupyx.scipy.ndimage as cupy_ndimage
+
+    print("  - Starting Multifractal Spectrum analysis (GPU Accelerated)...")
     multifractal_features = {}
-    
-    # Define moments q to scan
+    q_values = cp.array([-5, -2, 0, 1, 2, 5], dtype=cp.float64)
+    q_values_cpu = [-5, -2, 0, 1, 2, 5]
+    box_sizes = [2, 3, 4, 6, 8, 12, 16]
+
+    image_gpu = cp.array(image_3d, dtype=cp.int16)
+    masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
+
+    def get_multifractal_spectrum_gpu(binary_mask_gpu):
+        total_pixels = int(cp.sum(binary_mask_gpu))
+        if total_pixels < 50:
+            return {f"D_q_{q}": 0.0 for q in q_values_cpu} | {"Width": 0.0, "Alpha_0": 0.0}
+
+        pixels = cp.argwhere(binary_mask_gpu > 0)
+        N = float(total_pixels)
+        Z = defaultdict(list)
+        processed_sizes = []
+        results = {}
+
+        shape_z, shape_y, shape_x = binary_mask_gpu.shape
+
+        for eps in box_sizes:
+            if eps >= min(binary_mask_gpu.shape): continue
+            processed_sizes.append(eps)
+
+            box_indices = cp.floor(pixels / eps).astype(cp.int32)
+            
+            # Fast GPU flat-indexing for unique counting
+            max_y = (shape_y // eps) + 2
+            max_x = (shape_x // eps) + 2
+            flat_indices = box_indices[:, 0] * (max_y * max_x) + box_indices[:, 1] * max_x + box_indices[:, 2]
+
+            _, counts = cp.unique(flat_indices, return_counts=True)
+            p = counts / N
+
+            for q in q_values_cpu:
+                if q == 1:
+                    sum_val = cp.sum(p * cp.log(p + 1e-12))
+                else:
+                    sum_val = cp.sum(p ** q)
+                Z[q].append(float(sum_val))
+
+        if len(processed_sizes) < 3:
+             return {f"D_q_{q}": 0.0 for q in q_values_cpu} | {"Width": 0.0, "Alpha_0": 0.0}
+
+        x_all = np.log(np.array(processed_sizes))
+        tau_q = {}
+
+        for q in q_values_cpu:
+            z_values = np.array(Z[q])
+            mask = (z_values > 1e-20) & np.isfinite(z_values)
+
+            if np.sum(mask) < 3:
+                tau_q[q] = 0.0
+                results[f"D_q_{q}"] = 0.0
+                continue
+
+            y_clean = np.log(z_values[mask])
+            x_clean = x_all[mask]
+
+            slope, _, _, _, _ = stats.linregress(x_clean, y_clean)
+            tau_q[q] = slope
+
+            if q == 1:
+                results[f"D_q_{q}"] = slope
+            elif q != 1:
+                results[f"D_q_{q}"] = slope / (q - 1)
+
+        alphas = []
+        q_sorted = sorted(q_values_cpu)
+        for k in range(len(q_sorted)-1):
+            q1, q2 = q_sorted[k], q_sorted[k+1]
+            t1, t2 = tau_q[q1], tau_q[q2]
+            if (q2 - q1) != 0:
+                alphas.append((t2 - t1) / (q2 - q1))
+
+        if alphas:
+            results["Width"] = max(alphas) - min(alphas)
+            results["Alpha_0"] = np.mean(alphas)
+        else:
+            results["Width"] = 0.0
+            results["Alpha_0"] = 0.0
+
+        return results
+
+    # 1. Volume
+    for i in range(num_levels):
+        mf_res = get_multifractal_spectrum_gpu(masks_gpu[i])
+        multifractal_features[f'GLAM_VolumeMultifractal_Width_{i}'] = mf_res["Width"]
+        multifractal_features[f'GLAM_VolumeMultifractal_Alpha0_{i}'] = mf_res["Alpha_0"]
+        multifractal_features[f'GLAM_VolumeMultifractal_D2_{i}'] = mf_res.get("D_q_2", 0.0)
+
+    # 2. Interface
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            for j in range(num_levels):
+                if i != j:
+                    multifractal_features[f'GLAM_InterfaceMultifractal_Width_{i}_{j}'] = 0.0
+                    multifractal_features[f'GLAM_InterfaceMultifractal_Alpha0_{i}_{j}'] = 0.0
+                    multifractal_features[f'GLAM_InterfaceMultifractal_D2_{i}_{j}'] = 0.0
+            continue
+
+        dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+
+        for j in range(num_levels):
+            if i == j: continue
+
+            if not cp.any(masks_gpu[j]):
+                val_width, val_alpha, val_d2 = 0.0, 0.0, 0.0
+            else:
+                interface_gpu = dilated_i_gpu & masks_gpu[j]
+                if cp.sum(interface_gpu) < 50:
+                    val_width, val_alpha, val_d2 = 0.0, 0.0, 0.0
+                else:
+                    mf_res = get_multifractal_spectrum_gpu(interface_gpu)
+                    val_width = mf_res["Width"]
+                    val_alpha = mf_res["Alpha_0"]
+                    val_d2 = mf_res.get("D_q_2", 0.0)
+
+            multifractal_features[f'GLAM_InterfaceMultifractal_Width_{i}_{j}'] = val_width
+            multifractal_features[f'GLAM_InterfaceMultifractal_Alpha0_{i}_{j}'] = val_alpha
+            multifractal_features[f'GLAM_InterfaceMultifractal_D2_{i}_{j}'] = val_d2
+
+    del image_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    return multifractal_features
+
+def _calculate_glam_multifractal_spectrum_cpu(image_3d, num_levels):
+    """Fallback CPU function for Multifractal Spectrum."""
+    multifractal_features = {}
     q_values = np.array([-5, -2, 0, 1, 2, 5]) 
-    
-    # Box sizes for scaling analysis
     box_sizes = [2, 3, 4, 6, 8, 12, 16]
     
     def get_multifractal_spectrum(binary_mask):
@@ -2047,116 +3551,67 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
 
         pixels = np.argwhere(binary_mask > 0)
         N = len(pixels)
-        
-        # Partition function Z(q, epsilon)
         Z = defaultdict(list)
-        
-        # Track which sizes actually got processed
         processed_sizes = []
-        
+        results = {}
+
         for eps in box_sizes:
             if eps >= min(binary_mask.shape): continue
-            
             processed_sizes.append(eps)
-            
             box_indices = np.floor(pixels / eps).astype(int)
             _, counts = np.unique(box_indices, axis=0, return_counts=True)
             p = counts / N
-            
             for q in q_values:
-                if q == 1:
-                    # Shannon Entropy for q=1 (limit q->1)
-                    sum_val = np.sum(p * np.log(p + 1e-12))
-                else:
-                    sum_val = np.sum(p ** q)
-                
+                if q == 1: sum_val = np.sum(p * np.log(p + 1e-12))
+                else: sum_val = np.sum(p ** q)
                 Z[q].append(sum_val)
 
-        # Safety Check: Did we get enough scales for a regression?
         if len(processed_sizes) < 3:
              return {f"D_q_{q}": 0.0 for q in q_values} | {"Width": 0.0, "Alpha_0": 0.0}
              
-        # X-axis: log(epsilon)
         x_all = np.log(np.array(processed_sizes))
-        
         tau_q = {}
-        
         for q in q_values:
-            # Y-axis: log(Z(q, epsilon))
-            # Z[q] corresponds 1-to-1 with processed_sizes
             z_values = np.array(Z[q])
-            
-            # --- CRITICAL FIX: Mask invalid values before Log ---
-            # Remove NaNs, Infs, and Zeros (which cause log errors)
             mask = (z_values > 1e-20) & np.isfinite(z_values)
-            
             if np.sum(mask) < 3:
                 tau_q[q] = 0.0
                 results[f"D_q_{q}"] = 0.0
                 continue
-                
             y_clean = np.log(z_values[mask])
             x_clean = x_all[mask]
-            
-            # Perform Regression
             slope, _, _, _, _ = stats.linregress(x_clean, y_clean)
-            
-            tau = slope
-            tau_q[q] = tau
-            
-            # Calculate D_q
-            if q == 1:
-                results[f"D_q_{q}"] = tau 
-            elif q != 1:
-                results[f"D_q_{q}"] = tau / (q - 1)
+            tau_q[q] = slope
+            if q == 1: results[f"D_q_{q}"] = slope 
+            elif q != 1: results[f"D_q_{q}"] = slope / (q - 1)
         
-        # Calculate Alpha and f(Alpha) via finite difference
         alphas = []
         q_sorted = sorted(q_values)
         for i in range(len(q_sorted)-1):
             q1, q2 = q_sorted[i], q_sorted[i+1]
             t1, t2 = tau_q[q1], tau_q[q2]
-            
-            # Numerical derivative d(tau)/dq
-            if (q2 - q1) != 0:
-                alpha = (t2 - t1) / (q2 - q1)
-                alphas.append(alpha)
+            if (q2 - q1) != 0: alphas.append((t2 - t1) / (q2 - q1))
             
         if alphas:
             results["Width"] = max(alphas) - min(alphas)
             results["Alpha_0"] = np.mean(alphas)
         else:
-            results["Width"] = 0.0
-            results["Alpha_0"] = 0.0
+            results["Width"], results["Alpha_0"] = 0.0, 0.0
             
         return results
 
-    # Initialize results container - FIX: Define 'results' here so it resets per loop iteration logic in your original structure?
-    # Actually, the original code had 'results = {}' INSIDE the helper. 
-    # But here we need to loop over levels.
-    
-    # 1. Diagonal: Volume Multifractality
     for i in range(num_levels):
         binary_image = (image_3d == i)
-        # We need a fresh results dict inside the helper for each call
-        results = {} # This dummy initialization isn't used, the helper creates it. 
-        # Wait, the helper 'get_multifractal_spectrum' needs to define 'results = {}' inside itself.
-        # My snippet above returns 'results', so we are good.
-        
         mf_res = get_multifractal_spectrum(binary_image)
-        
         multifractal_features[f'GLAM_VolumeMultifractal_Width_{i}'] = mf_res["Width"]
         multifractal_features[f'GLAM_VolumeMultifractal_Alpha0_{i}'] = mf_res["Alpha_0"]
         multifractal_features[f'GLAM_VolumeMultifractal_D2_{i}'] = mf_res.get("D_q_2", 0.0)
 
-    # 2. Off-Diagonal: Interface Multifractality
     for i in range(num_levels):
         for j in range(num_levels):
             if i == j: continue
-            
             mask_i = (image_3d == i)
             mask_j = (image_3d == j)
-            
             if not np.any(mask_i) or not np.any(mask_j):
                 val_width, val_alpha, val_d2 = 0.0, 0.0, 0.0
             else:
@@ -2165,9 +3620,7 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
                     val_width, val_alpha, val_d2 = 0.0, 0.0, 0.0
                 else:
                     mf_res = get_multifractal_spectrum(interface)
-                    val_width = mf_res["Width"]
-                    val_alpha = mf_res["Alpha_0"]
-                    val_d2 = mf_res.get("D_q_2", 0.0)
+                    val_width, val_alpha, val_d2 = mf_res["Width"], mf_res["Alpha_0"], mf_res.get("D_q_2", 0.0)
             
             multifractal_features[f'GLAM_InterfaceMultifractal_Width_{i}_{j}'] = val_width
             multifractal_features[f'GLAM_InterfaceMultifractal_Alpha0_{i}_{j}'] = val_alpha
@@ -2175,43 +3628,132 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
 
     return multifractal_features
 
+
 def calculate_glam_shape_matrices(structured_image, num_levels, spacing):
     """
-    Calculates 3D shape features for:
-    1. Diagonals (Per-Level): Sphericity, Spikiness (Kurtosis), Solidity.
-    2. Off-Diagonals (Inter-Level): Centroid Distance, Interface Area.
+    Calculates 3D shape features (Sphericity, Area, Radial Variance).
+    Uses GPU acceleration to rapidly solve Interface Areas.
     """
+    if not HAS_GPU:
+        return _calculate_glam_shape_matrices_cpu(structured_image, num_levels, spacing)
+
+    import cupyx.scipy.ndimage as cupy_ndimage
+
+    print("  - Starting Shape Matrices analysis (GPU Accelerated)...")
+    feats = {}
+    spacing_zyx = spacing[::-1]
+    voxel_vol = np.prod(spacing)
+
+    # Crop to Bounding Box to minimize memory overhead
+    mask_all = (structured_image > -1)
+    if not np.any(mask_all): return feats
+
+    slices = ndimage.find_objects(mask_all.astype(int))
+    if not slices: return feats
+
+    roi_img = structured_image[slices[0]].copy()
+
+    # Move cropped image to GPU
+    roi_img_gpu = cp.array(roi_img, dtype=cp.int16)
+    masks_gpu = {i: (roi_img_gpu == i) for i in range(num_levels)}
+
+    # 1. DIAGONALS & Centroids (Marching Cubes stays on CPU)
+    centroids = {}
+    for i in range(num_levels):
+        mask_i_cpu = masks_gpu[i].get()
+        voxel_coords_idx = np.argwhere(mask_i_cpu)
+        n_voxels = len(voxel_coords_idx)
+
+        if n_voxels > 0:
+            c_mass = np.mean(voxel_coords_idx * np.array(spacing_zyx), axis=0)
+            centroids[i] = c_mass
+
+        val_sphericity, val_solidity = 0.0, 0.0
+        val_rad_mean, val_rad_var = 0.0, 0.0
+        val_rad_skew, val_rad_kurt = 0.0, 0.0
+
+        if n_voxels >= 4:
+            physical_coords = voxel_coords_idx * np.array(spacing_zyx)
+            try:
+                verts, faces, _, _ = measure.marching_cubes(mask_i_cpu, level=0.5, spacing=spacing_zyx)
+                surf_area = measure.mesh_surface_area(verts, faces)
+                vol = n_voxels * voxel_vol
+                if surf_area > 0:
+                    val_sphericity = (np.pi**(1/3) * (6 * vol)**(2/3)) / surf_area
+
+                centroid_mesh = np.mean(verts, axis=0)
+                radial_dists = np.linalg.norm(verts - centroid_mesh, axis=1)
+                val_rad_mean = np.mean(radial_dists)
+                val_rad_var = np.var(radial_dists)
+                val_rad_skew = stats.skew(radial_dists)
+                val_rad_kurt = stats.kurtosis(radial_dists)
+            except: pass
+
+            try:
+                hull = ConvexHull(physical_coords)
+                if hull.volume > 0: val_solidity = (n_voxels * voxel_vol) / hull.volume
+                else: val_solidity = 1.0
+            except: val_solidity = 1.0 if n_voxels > 0 else 0.0
+
+        feats[f'GLAM_Shape_Sphericity_{i}'] = val_sphericity
+        feats[f'GLAM_Shape_Solidity_{i}'] = val_solidity
+        feats[f'GLAM_Shape_RadialMean_{i}'] = val_rad_mean
+        feats[f'GLAM_Shape_RadialVariance_{i}'] = val_rad_var
+        feats[f'GLAM_Shape_RadialSkewness_{i}'] = val_rad_skew
+        feats[f'GLAM_Shape_RadialKurtosis_{i}'] = val_rad_kurt
+
+    # 2. OFF-DIAGONALS (GPU Accelerated Dilation!)
+    for i in range(num_levels):
+        dilated_i_gpu = None
+        if cp.any(masks_gpu[i]):
+            dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+
+        for j in range(num_levels):
+            if i == j: continue
+
+            val_dist = 0.0
+            if i in centroids and j in centroids:
+                val_dist = np.linalg.norm(centroids[i] - centroids[j])
+            feats[f'GLAM_Shape_CentroidDist_{i}_{j}'] = val_dist
+
+            val_interface = 0.0
+            if dilated_i_gpu is not None and cp.any(masks_gpu[j]):
+                intersection = dilated_i_gpu & masks_gpu[j]
+                val_interface = float(cp.sum(intersection)) * voxel_vol
+
+            feats[f'GLAM_Shape_InterfaceArea_{i}_{j}'] = val_interface
+
+    # Cleanup
+    del roi_img_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+
+    return feats
+
+def _calculate_glam_shape_matrices_cpu(structured_image, num_levels, spacing):
+    """Fallback CPU function for Shape matrices."""
+    print("  - Starting Shape Matrices analysis (CPU)...")
     feats = {}
     spacing_zyx = spacing[::-1]
     voxel_vol = np.prod(spacing)
     
-    # --- OPTIMIZATION: Crop to Tumor Bounding Box ---
     mask_all = (structured_image > -1)
     if not np.any(mask_all): return feats
     
     slices = ndimage.find_objects(mask_all.astype(int))
     if not slices: return feats
-    
     roi_img = structured_image[slices[0]].copy()
     
-    # 1. DIAGONALS & Centroids
     centroids = {} 
-    
     for i in range(num_levels):
         mask_i = (roi_img == i)
         voxel_coords_idx = np.argwhere(mask_i)
         n_voxels = len(voxel_coords_idx)
         
-        if n_voxels > 0:
-            c_mass = np.mean(voxel_coords_idx * np.array(spacing_zyx), axis=0)
-            centroids[i] = c_mass
+        if n_voxels > 0: centroids[i] = np.mean(voxel_coords_idx * np.array(spacing_zyx), axis=0)
         
-        val_sphericity = 0.0
-        val_solidity = 0.0 
-        val_rad_mean = 0.0
-        val_rad_var = 0.0
-        val_rad_skew = 0.0
-        val_rad_kurt = 0.0
+        val_sphericity, val_solidity = 0.0, 0.0 
+        val_rad_mean, val_rad_var, val_rad_skew, val_rad_kurt = 0.0, 0.0, 0.0, 0.0
         
         if n_voxels >= 4:
             physical_coords = voxel_coords_idx * np.array(spacing_zyx)
@@ -2219,15 +3761,11 @@ def calculate_glam_shape_matrices(structured_image, num_levels, spacing):
                 verts, faces, _, _ = measure.marching_cubes(mask_i, level=0.5, spacing=spacing_zyx)
                 surf_area = measure.mesh_surface_area(verts, faces)
                 vol = n_voxels * voxel_vol
-                if surf_area > 0:
-                    val_sphericity = (np.pi**(1/3) * (6 * vol)**(2/3)) / surf_area
-                
+                if surf_area > 0: val_sphericity = (np.pi**(1/3) * (6 * vol)**(2/3)) / surf_area
                 centroid_mesh = np.mean(verts, axis=0)
                 radial_dists = np.linalg.norm(verts - centroid_mesh, axis=1)
-                val_rad_mean = np.mean(radial_dists)
-                val_rad_var = np.var(radial_dists)
-                val_rad_skew = stats.skew(radial_dists)
-                val_rad_kurt = stats.kurtosis(radial_dists)
+                val_rad_mean, val_rad_var = np.mean(radial_dists), np.var(radial_dists)
+                val_rad_skew, val_rad_kurt = stats.skew(radial_dists), stats.kurtosis(radial_dists)
             except: pass
             
             try:
@@ -2243,15 +3781,12 @@ def calculate_glam_shape_matrices(structured_image, num_levels, spacing):
         feats[f'GLAM_Shape_RadialSkewness_{i}'] = val_rad_skew
         feats[f'GLAM_Shape_RadialKurtosis_{i}'] = val_rad_kurt
 
-    # 2. OFF-DIAGONALS
     for i in range(num_levels):
         for j in range(num_levels):
             if i == j: continue 
             
             val_dist = 0.0
-            if i in centroids and j in centroids:
-                val_dist = np.linalg.norm(centroids[i] - centroids[j])
-            
+            if i in centroids and j in centroids: val_dist = np.linalg.norm(centroids[i] - centroids[j])
             feats[f'GLAM_Shape_CentroidDist_{i}_{j}'] = val_dist
             
             mask_i = (roi_img == i)
@@ -2266,3 +3801,4 @@ def calculate_glam_shape_matrices(structured_image, num_levels, spacing):
             feats[f'GLAM_Shape_InterfaceArea_{i}_{j}'] = val_interface
 
     return feats
+

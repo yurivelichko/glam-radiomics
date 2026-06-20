@@ -62,9 +62,9 @@ Once a multi-dimensional GLAM matrix is generated, the following statistics are 
    * - **First-Order Statistics**
      - Global distribution of affinity values in the matrix.
      - Mean, Variance, Skewness, Kurtosis, Energy.
-   * - **Second-Order Meta**
-     - Structural heterogeneity of the affinity landscape matrix itself.
-     - Contrast, Correlation, Joint Entropy.
+   * - **Thermodynamic & Thermodynamic State**
+     - Quantifies the interaction and physical arrangement of tissue clusters.
+     - Configurational Disorder Index, Pressure Virial, Coordination Number.
    * - **Profile Shape / Bimodality**
      - Detects structural separation and tissue layering on matrix diagonals.
      - Peak Separation, Bimodality Index, Roughness.
