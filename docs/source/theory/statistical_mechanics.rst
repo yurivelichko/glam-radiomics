@@ -25,7 +25,7 @@ RDF Shape Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 To capture the extensive information embedded in the full RDF curves without incurring the "curse of dimensionality," we transform key statistical properties of each :math:`g_{\alpha\beta}(r)` curve into a set of primary GLAM matrices. For every gray-level pair, we compute the Peak Position, Dispersion Ratio, Peak Height, Median, Variance, Skewness, and Kurtosis.
 
-.. figure:: /_static/GLAM_RDFMedian.png
+.. figure:: /_static/GLAM_LogRDF_Median.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
@@ -46,7 +46,7 @@ The second virial coefficient distills the complex, distance-dependent informati
 * **Negative value**: Indicates net attraction or affinity between gray levels[cite: 66].
 * **Positive value**: Suggests net repulsion[cite: 66].
 
-.. figure:: /_static/GLAM_B2.png
+.. figure:: /_static/GLAM_B2_Symlog.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
@@ -105,7 +105,7 @@ Broadly analogous to the virial equation of state, the Structural Pressure Index
 
    SPI_{\alpha,\beta} = -\frac{\rho_\alpha \rho_\beta}{6} \int_{0}^{R_{max}} r \frac{dW_{\alpha\beta}(r)}{dr} g_{\alpha\beta}(r) 4\pi r^2 dr
 
-.. figure:: /_static/GLAM_PressVirial.png
+.. figure:: /_static/GLAM_StructuralPressureIndex_Symlog.png
    :width: 700px
    :align: center
    :alt: Structural Pressure Index Matrix
@@ -127,6 +127,13 @@ Drawing from the Boltzmann relation, which links the probability of a configurat
 
 Averaging :math:`CDI(r)` within the first coordination shell yields a stable, physically interpretable estimate of the local structural disorder, :math:`CDI(\alpha,\beta)`. A high :math:`CDI(\alpha,\beta)` indicates greater structural "noise" or heterogeneity, while a low :math:`CDI` indicates rigid or highly structured ordering. Comparing diagonal versus off-diagonal :math:`CDI(\alpha,\beta)` elements distinguishes self-organized tissue components from dynamically disordered interfaces. 
 
+.. figure:: /_static/GLAM_ConfigurationalDisorderIndex_Symlog.png
+   :width: 700px
+   :align: center
+   :alt: Structural Pressure Index Matrix
+   
+   **Figure:** Configurational Disorder Index matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
 * **Interpretation**: This metric asks, *"How much structural 'noise' or configurational disorder exists in this tissue compared to a perfectly ordered state?"*
 * **Advantage**: It provides a clear indicator of architectural chaos; highly disordered tissues appear random and heterogeneous, while low-disorder tissues are rigidly structured. This thermodynamic-inspired approach provides a robust, physically interpretable measure of local architectural complexity in medical images.
 
@@ -146,6 +153,13 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 .. math::
 
    W_{\alpha\beta} = \int_{0}^{R_{max}} \left| N_{structured}(R) - N_{random}(R) \right| dR
+
+.. figure:: /_static/GLAM_Wasserstein_Ln.png
+   :width: 700px
+   :align: center
+   :alt: Structural Pressure Index Matrix
+   
+   **Figure:** Wasserstein matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
 
 * **High Value**: Indicates a highly complex, non-random architecture with a high energetic "cost" of assembly, typical of highly organized distinct sub-regions or rigid boundaries.

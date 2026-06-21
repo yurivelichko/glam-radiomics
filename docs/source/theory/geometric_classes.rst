@@ -17,7 +17,7 @@ The Coordination Number (CN) measures the local packing or clustering of gray-le
 
 where :math:`\rho_\beta` is the mean voxel density and :math:`r_{min}` is the first RDF minimum beyond the primary peak. Diagonal terms describe local self-clustering (e.g., tumor cell density), whereas off-diagonal elements quantify the degree of direct interfacing between cancerous and stromal tissue.
 
-.. figure:: /_static/GLAM_CoordNumber.png
+.. figure:: /_static/GLAM_CoordNum_Ln.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
@@ -35,6 +35,13 @@ The Radial Distribution Function typically exhibits an exponential decay as dist
    g(r) - 1 \approx A e^{-\kappa r}
 
 where :math:`\kappa` is the Inverse Correlation Length (or Decay Rate). 
+
+.. figure:: /_static/GLAM_InverseCorrelationLength.png
+   :width: 700px
+   :align: center
+   :alt: Second Virial Coefficient 
+
+   **Figure:** Inverse Correlation Length matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
 * **Interpretation**: A high decay rate (:math:`\kappa > 0`) indicates tightly packed, highly structured local tissue domains (rapid loss of correlation). A decay rate approaching exactly :math:`0.0` indicates a completely flat, random tissue distribution (a "gas-like" state) with infinite correlation length.
 * **Advantage**: By fitting the decay rate (:math:`\kappa`) directly rather than the positional correlation length (:math:`\xi = 1/\kappa`), the GLAM mathematical domain is safely bounded. This prevents asymptotic explosions to infinity when analyzing highly random or diffuse tissues, ensuring absolute stability for downstream machine learning algorithms.
@@ -68,7 +75,7 @@ GLAM utilizes a 3D box-counting algorithm to quantify multiscale self-similarity
 * **Interface Fractal Dimension (:math:`D_I`)**: Measures the roughness and invasiveness of boundaries between two tissue types.
 * **Multifractal Spectrum**: Employs Generalized Dimensions (:math:`D_q`) to characterize tissues where scaling properties vary across the region. The spectrum width (:math:`\Delta\alpha`) quantifies the diversity of scaling behaviors, representing the "heterogeneous chaos" of the tissue.
 
-.. figure:: /_static/GLAM_FractalDim.png
+.. figure:: /_static/GLAM_FractalDimension.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
@@ -82,6 +89,16 @@ Lacunarity (:math:`\Lambda`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 While fractal dimension quantifies space-filling, Lacunarity measures the "gappiness" or heterogeneity of void spaces within the tissue architecture. High Lacunarity indicates large, irregular gaps, while low values suggest a uniform, homogeneous distribution.
 
+.. figure:: /_static/GLAM_Lacunarity_Ln.png
+   :width: 700px
+   :align: center
+   :alt: Second Virial Coefficient 
+
+   **Figure:** Lacunarity matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+* **Interpretation**: This metric asks, *"How complex, branching, and space-filling is this tissue structure across different zoom levels?"*
+* **Advantage**: It captures the self-similar "roughness" of biological tissues, allowing for robust differentiation between smooth, encapsulated tumors and highly invasive, branching morphologies.
+
 Topological Invariants (Betti Numbers)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 GLAM uses algebraic topology to count discrete features that are invariant under continuous deformation:
@@ -91,7 +108,15 @@ GLAM uses algebraic topology to count discrete features that are invariant under
 * **Betti-2 (:math:`B_2`)**: Counts enclosed internal cavities or voids.
 * **Euler Characteristic (:math:`\chi`)**: A classic measure of topological complexity, where :math:`\chi = B_0 - B_1 + B_2`.
 
-.. figure:: /_static/GLAM_Euler.png
+.. figure:: /_static/GLAM_Betti0_Ln.png
+   :width: 700px
+   :align: center
+   :alt: Second Virial Coefficient 
+
+   **Figure:** Betti0 matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+
+.. figure:: /_static/GLAM_Euler_Symlog.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
@@ -120,6 +145,13 @@ Where:
 * :math:`M(i, j)_{\text{structured}}` is the measured topological feature in the actual tumor image.
 * :math:`M(i, j)_{\text{random}}` is the expected topological feature if the tissue voxels were mixed perfectly at random.
 
+.. figure:: /_static/GLAM_Euler_Excess_Symlog.png
+   :width: 700px
+   :align: center
+   :alt: Second Virial Coefficient 
+
+   **Figure:** Euler Characteristic Excess matrices (Symlog) derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
 **General Interpretation:**
 
 * **Negative Excess** (:math:`\Delta M < 0`): The spatial architecture is highly ordered to *suppress* this specific topological feature compared to random noise.
@@ -140,7 +172,7 @@ This category extracts explicit geometric descriptors for distinct tissue cluste
 * **Interface Area**: Quantifies the total surface of direct contact between two distinct tissue types, representing the extent of physical infiltration.
 * **Centroid Distance**: Measures the Euclidean distance between the centers of mass of different tissue components.
 
-.. figure:: /_static/GLAM_CentroidDist.png
+.. figure:: /_static/GLAM_Shape_CentroidDist_Ln.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
