@@ -152,6 +152,25 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 * **Low Value**: Indicates the tissue architecture is very close to a completely random distribution of cells or voxels.
 
 
+Note on the Removal of JS Divergence (Asymmetry)
+------------------------------------------------
+In earlier versions of GLAM, the Jensen-Shannon (JS) Divergence was calculated to measure the structural asymmetry between two interacting tissues by comparing the probability distribution of finding tissue B around A (``g_ij``) versus finding tissue A around B (``g_ji``). 
+
+This feature has been formally deprecated and removed from the pipeline due to the thermodynamic law of **Global Reciprocity**.
+
+In statistical mechanics, the unnormalized pair correlation functions are strictly bound by the global volumetric densities (``ρ``) of the two tissues:
+  
+  ``g_ij(r) * ρ_j = g_ji(r) * ρ_i``
+
+To compare these curves using Information Theory (like JS Divergence or Kullback-Leibler), they must first be L1-normalized into true probability distributions (``P`` and ``Q``). Because ``g_ij`` and ``g_ji`` differ only by a scalar constant, dividing them by their respective sums completely cancels out the volumetric density constant. 
+
+Mathematically, this forces the normalized distributions to be identical (``P(r) == Q(r)``). Therefore, the theoretical JS Divergence between any two tissues in the GLAM framework is exactly ``0.0``.
+
+**What this means for users:**
+We found that any non-zero JS Divergence values produced by the pipeline were strictly the result of microscopic stochastic variance during the random sampling phase (shot noise), not true biological signal. To ensure mathematical purity and prevent "junk" features from entering downstream machine learning models, these matrices were removed.
+
+Users wishing to measure the asymmetry and directional alignment of tumor structures should refer to the **Gyration Tensor Anisotropy** (``GLAM_Anisotropy_matrix``) and the **Interface Area** (``GLAM_Shape_InterfaceArea_matrix``) features, which perfectly capture non-reciprocal topological behaviors.
+
 Jensen-Shannon (JS) Divergence
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 While the standard RDF quantifies the distance-dependent interaction between two specific gray levels, comparing reciprocal RDF curves allows us to evaluate the directional symmetry—or structural anisotropy—of this relationship. In a perfectly isotropic (directionless) texture, the probability of finding gray level :math:`\beta` at distance :math:`r` from gray level :math:`\alpha` should be identical to finding gray level :math:`\alpha` at distance :math:`r` from gray level :math:`\beta`. Therefore, 

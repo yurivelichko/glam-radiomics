@@ -20,3 +20,11 @@ GLAM 1.3.0 (Update)
 -------------------------
 * June 2026
 * Parameter optimization for improved performance and accuracy
+
+GLAM 1.3.2 (Update)
+-------------------------
+* June 2026
+* **Removed Jensen-Shannon (JS) Divergence Matrices:** Deprecated the ``GLAM_JSDivergence_matrix`` and ``GLAM_CumulativeJSDivergence_matrix`` features. A mathematical audit confirmed that due to the thermodynamic law of Global Reciprocity, the L1-normalized radial distribution distributions for cross-pairs (i,j) and (j,i) are mathematically identical. Any non-zero JS divergence previously captured was strictly stochastic sampling noise. True tissue anisotropy is now exclusively measured via the robust Gyration Tensor (``GLAM_Anisotropy_i_j``) and Shape Interface matrices.
+* **Stabilized Spatial Correlation Metrics:** Replaced the Positional Correlation Length (``GLAM_corr_length_matrix``) with the Inverse Correlation Length / Decay Rate (``GLAM_InverseCorrelationLength_matrix``). 
+  * *The Physics:* Previously, perfectly random or "flat" tissue distributions caused the correlation length (xi) to explode toward infinity, leading to optimizer crashes or massive numerical outliers (NaNs). 
+  * *The Fix:* By fitting the decay rate (kappa) directly, the mathematical domain is now safely bounded. A highly structured tissue returns a positive decay rate, while a completely random tissue gracefully evaluates to exactly ``0.0``. This eliminates all curve-fitting crashes and provides a perfectly stable, bounded feature for downstream machine learning.

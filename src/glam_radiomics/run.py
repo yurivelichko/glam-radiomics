@@ -22,10 +22,8 @@ from .core import (
     calculate_glcm_style_meta_features, 
     # Original GLAM functions
     calculate_rdf_3d,
-    calculate_js_divergence_matrix,
-    calculate_cumulative_js_matrix,
     calculate_glam_b2_3d,
-    calculate_glam_correlation_length,
+    calculate_glam_inverse_correlation_length,
     calculate_glam_coordination_number,
     calculate_glam_compressibility,
     calculate_anisotropic_glam_features,
@@ -183,7 +181,7 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
     print("  - Starting Primary GLAM Feature calculation...")
     glam_features = {
         **calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels),
-        **calculate_glam_correlation_length(rdf_structured_df, rdf_random_df, num_levels),
+        **calculate_glam_inverse_correlation_length(rdf_structured_df, rdf_random_df, num_levels),
         **calculate_glam_coordination_number(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
         **calculate_glam_compressibility(rdf_structured_df, num_levels),
         **calculate_anisotropic_glam_features(structured_glam_image, num_levels, anisotropy_cutoff_radius), 
@@ -195,9 +193,7 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
         **calculate_glam_structural_pressure_index(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
         **calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels),
         **calculate_glam_shape_matrices(structured_glam_image, num_levels, spacing),
-        **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels),
-        **calculate_js_divergence_matrix(rdf_structured_df, num_levels),
-        **calculate_cumulative_js_matrix(rdf_structured_df, num_levels)
+        **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels)
     }
     return glam_features
 
@@ -273,15 +269,13 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     print("  - Building, saving, and analyzing GLAM matrices...")
     glam_matrix_defs = {
         "B2": ("GLAM_B2_for_", None),
-        "CorrLength": ("GLAM_corr_length_", None),
+        "InverseCorrelationLength": ("GLAM_InverseCorrelationLength_", None),
         "CoordNum": ("GLAM_CoordNum_", None),
         "Anisotropy": ("GLAM_Anisotropy_", None),
         "PotentialEnergy": ("GLAM_PotentialEnergy_", None),
         "StructuralPressureIndex": ("GLAM_StructuralPressureIndex_", None),
         "ConfigurationalDisorderIndex": ("GLAM_ConfigurationalDisorderIndex_", None),
         "Wasserstein": ("GLAM_Wasserstein_", None),
-        "JSDivergence": ("GLAM_JSDivergence_", None), 
-        "CumulativeJSDivergence": ("GLAM_CumulativeJSDivergence_", None),
         "FractalDimension": ("GLAM_InterfaceFD_", "GLAM_VolumeFD_"),
         "MultifractalWidth": ("GLAM_InterfaceMultifractal_Width_", "GLAM_VolumeMultifractal_Width_"),
         "MultifractalAlpha0": ("GLAM_InterfaceMultifractal_Alpha0_", "GLAM_VolumeMultifractal_Alpha0_"),
@@ -397,7 +391,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     shape_targets = [
         'Betti0_Ln', 'Betti1_Ln', 'Betti2_Ln', 'Euler_Symlog', 
         'FractalDimension', 'Lacunarity_Ln', 'MultifractalWidth', 'MultifractalAlpha0', 'MultifractalD2',
-        'CorrLength', 'Anisotropy', 
+        'InverseCorrelationLength', 'Anisotropy',  # <--- UPDATED HERE
         'PotentialEnergy_Symlog', 'CoordNum_Ln', 'ConfigurationalDisorderIndex_Symlog', 'StructuralPressureIndex_Symlog',   
         'Shape_CentroidDist_Ln', 'Shape_InterfaceArea_Ln'
     ]

@@ -27,26 +27,17 @@ where :math:`\rho_\beta` is the mean voxel density and :math:`r_{min}` is the fi
 * **Interpretation**: This metric asks, *"On average, how many immediate neighbors of type B does a central voxel of type A physically touch?"*
 * **Advantage**: It provides a direct, intuitive measure of local packing density and the physical extent of the immediate contact boundary between different tissue types.
 
-Correlation Length (:math:`\xi`)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-While :math:`B_2` quantifies the magnitude of spatial order, the correlation length :math:`\xi(\alpha, \beta)` characterizes its spatial extent. It describes the range over which voxel interactions persist before structural memory is lost:
+Inverse Correlation Length (Decay Rate, :math:`\kappa`)
+-------------------------------------------------------
+The Radial Distribution Function typically exhibits an exponential decay as distance increases, reflecting the transition from short-range structural order to long-range randomness. GLAM quantifies this decay rate:
 
 .. math::
+   g(r) - 1 \approx A e^{-\kappa r}
 
-   h_{\alpha\beta}(r) \propto A \exp \left( -\frac{r}{\xi_{\alpha,\beta}} \right), \quad r > r_{peak}
+where :math:`\kappa` is the Inverse Correlation Length (or Decay Rate). 
 
-Longer correlation lengths indicate coherent, organized structures, while shorter ones imply more localized or disordered texture.
-
-.. figure:: /_static/GLAM_CorrelLength.png
-   :width: 700px
-   :align: center
-   :alt: Second Virial Coefficient 
-
-   **Figure:** Correlation Length matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
-
-
-* **Interpretation**: This metric asks, *"How far away does a voxel still 'feel' the structural influence of a reference voxel before the tissue arrangement becomes completely random?"*
-* **Advantage**: It quantifies the absolute physical size of coherent biological structures (like tumor nests or stromal bands) independently of their intensity values.
+* **Interpretation**: A high decay rate (:math:`\kappa > 0`) indicates tightly packed, highly structured local tissue domains (rapid loss of correlation). A decay rate approaching exactly :math:`0.0` indicates a completely flat, random tissue distribution (a "gas-like" state) with infinite correlation length.
+* **Advantage**: By fitting the decay rate (:math:`\kappa`) directly rather than the positional correlation length (:math:`\xi = 1/\kappa`), the GLAM mathematical domain is safely bounded. This prevents asymptotic explosions to infinity when analyzing highly random or diffuse tissues, ensuring absolute stability for downstream machine learning algorithms.
 
 Anisotropy Indices
 ~~~~~~~~~~~~~~~~~~

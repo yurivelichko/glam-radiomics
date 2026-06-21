@@ -1001,123 +1001,6 @@ def apply_geometric_correction(rdf_df, geom_factor_series):
             
     return corrected_df
 
-def calculate_js_divergence_matrix(rdf_df, num_levels):
-    """
-    Calculates the symmetric Jensen-Shannon (JS) Divergence Anisotropy Matrix 
-    by comparing RDF_ij and RDF_ji. Applies exp(-lambda * r) spatial damping.
-    """
-    js_features = {}
-    if rdf_df.empty: return {}
-    
-    r = rdf_df['r'].values
-
-    def safe_kl(p, q):
-        """Native KL divergence that safely handles 0 * log(0) = 0"""
-        mask = p > 0
-        out = np.zeros_like(p)
-        # Using log2 bounds the final JS divergence strictly between 0 and 1
-        out[mask] = p[mask] * np.log2(p[mask] / q[mask])
-        return np.sum(out)
-
-    for i in range(num_levels):
-        for j in range(num_levels):
-            # The diagonal is perfectly symmetric with itself
-            if i == j:
-                js_features[f'GLAM_JSDivergence_{i}_{j}'] = 0.0
-                continue
-            
-            key_ij = f'g_{i}_{j}'
-            key_ji = f'g_{j}_{i}'
-            
-            if key_ij in rdf_df.columns and key_ji in rdf_df.columns:
-                # 2. Apply damping envelope to raw RDF curves
-                P_raw = np.nan_to_num(rdf_df[key_ij].values) 
-                Q_raw = np.nan_to_num(rdf_df[key_ji].values) 
-                
-                sum_P = np.sum(P_raw)
-                sum_Q = np.sum(Q_raw)
-                
-                # If both are physical vacuums, they have 0 structural disagreement
-                if sum_P == 0 and sum_Q == 0:
-                    js_features[f'GLAM_JSDivergence_{i}_{j}'] = 0.0
-                    continue
-                    
-                # 3. L1 Re-normalization (Mandatory for probability distributions)
-                P = P_raw / sum_P if sum_P > 0 else np.zeros_like(P_raw)
-                Q = Q_raw / sum_Q if sum_Q > 0 else np.zeros_like(Q_raw)
-                
-                # 4. Calculate Shared Midpoint M
-                M = 0.5 * (P + Q)
-                
-                # 5. Calculate JS Divergence
-                js_val = 0.5 * safe_kl(P, M) + 0.5 * safe_kl(Q, M)
-                js_features[f'GLAM_JSDivergence_{i}_{j}'] = js_val
-            else:
-                js_features[f'GLAM_JSDivergence_{i}_{j}'] = np.nan
-                
-    return js_features
-
-def calculate_cumulative_js_matrix(rdf_df, num_levels):
-    """
-    Calculates a 'Wasserstein-smoothed' JS Divergence Matrix.
-    Instead of comparing local density g(r), it compares the Cumulative Coordination 
-    profiles N(R) using the JS Divergence, resulting in a much smoother anisotropy matrix.
-    """
-    js_features = {}
-    if rdf_df.empty: return {}
-    
-    r = rdf_df['r'].values
-
-    def safe_kl(p, q):
-        """Native KL divergence that safely handles 0 * log(0) = 0"""
-        mask = p > 0
-        out = np.zeros_like(p)
-        out[mask] = p[mask] * np.log2(p[mask] / q[mask])
-        return np.sum(out)
-
-    for i in range(num_levels):
-        for j in range(num_levels):
-            # The diagonal is perfectly symmetric with itself
-            if i == j:
-                js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = 0.0
-                continue
-            
-            key_ij = f'g_{i}_{j}'
-            key_ji = f'g_{j}_{i}'
-            
-            if key_ij in rdf_df.columns and key_ji in rdf_df.columns:
-                # 1. Get raw screened signals (incorporating spherical volume element r^2)
-                # This matches the core of the Wasserstein integrand
-                P_shell = np.nan_to_num(rdf_df[key_ij].values) * (r**2)
-                Q_shell = np.nan_to_num(rdf_df[key_ji].values) * (r**2)
-                
-                # 2. Convert to Cumulative Profiles (The "Wasserstein" smoothing step)
-                # We use cumulative_trapezoid to build a smooth, monotonically increasing curve
-                P_cumul = scipy.integrate.cumulative_trapezoid(P_shell, r, initial=0)
-                Q_cumul = scipy.integrate.cumulative_trapezoid(Q_shell, r, initial=0)
-                
-                sum_P = np.sum(P_cumul)
-                sum_Q = np.sum(Q_cumul)
-                
-                # If both are physical vacuums, they have 0 structural disagreement
-                if sum_P == 0 and sum_Q == 0:
-                    js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = 0.0
-                    continue
-                    
-                # 3. L1 Re-normalization of the CUMULATIVE profiles
-                P = P_cumul / sum_P if sum_P > 0 else np.zeros_like(P_cumul)
-                Q = Q_cumul / sum_Q if sum_Q > 0 else np.zeros_like(Q_cumul)
-                
-                # 4. Calculate Shared Midpoint M
-                M = 0.5 * (P + Q)
-                
-                # 5. Calculate JS Divergence on the smoothed profiles
-                js_val = 0.5 * safe_kl(P, M) + 0.5 * safe_kl(Q, M)
-                js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = js_val
-            else:
-                js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = np.nan
-                
-    return js_features
 
 def calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels):
     """Calculates the 3D B2 coefficient."""
@@ -1137,24 +1020,25 @@ def calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels):
     return glam_b2_coeffs
 
 
-def calculate_glam_correlation_length(rdf_structured_df, rdf_random_df, num_levels):
-    """Calculates the Positional Correlation Length."""
+def calculate_glam_inverse_correlation_length(rdf_structured_df, rdf_random_df, num_levels):
+    """Calculates the Inverse Positional Correlation Length (Decay Rate, kappa)."""
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
 
-    glam_corr_lengths = {}
+    glam_inv_corr_lengths = {}
     if rdf_structured_df.empty or rdf_random_df.empty: return {}
-    def exp_decay(r, A, xi): return A * np.exp(-r / xi)
     
-    max_radius = get_config('MaxRdfRadius')
-    dynamic_cap = max_radius * 5.0  # e.g., 50.0 if max_radius is 10
+    # NEW: Fit the Decay Rate (kappa) directly
+    def exp_decay_rate(r, A, kappa): 
+        return A * np.exp(-kappa * r)
 
     for alpha in range(num_levels):
         for beta in range(num_levels):
             key = f'g_{alpha}_{beta}'
-            corr_len_key = f'GLAM_corr_length_{key}'
+            inv_corr_len_key = f'GLAM_InverseCorrelationLength_{alpha}_{beta}'
+            
             if key not in rdf_structured_df.columns or key not in rdf_random_df.columns:
-                glam_corr_lengths[corr_len_key] = np.nan
+                glam_inv_corr_lengths[inv_corr_len_key] = np.nan
                 continue
             
             h_r_raw = rdf_structured_df[key].values - rdf_random_df[key].values
@@ -1175,20 +1059,20 @@ def calculate_glam_correlation_length(rdf_structured_df, rdf_random_df, num_leve
                 
                 r_fit = r_vals[peak_index:]
                 h_fit = np.abs(h_r[peak_index:]) 
-
-                if np.mean(h_fit) > h_fit[0] * 0.95 and np.var(h_fit) < 1e-4 : raise ValueError("Data is too flat.")
                 
-                initial_guess = [np.abs(h_r[peak_index]), 3.0] 
-                #popt, _ = curve_fit(exp_decay, r_fit, h_fit, p0=initial_guess, maxfev=5000, bounds=([-np.inf, 0], [np.inf, np.inf]))
+                # NEW: Initial guess (0.3 is a safe default decay rate)
+                initial_guess = [np.abs(h_r[peak_index]), 0.3] 
                 
-                popt, _ = curve_fit(exp_decay, r_fit, h_fit, p0=initial_guess, maxfev=1000, 
-                                    ftol=1e-3, method='trf', bounds=([-np.inf, 0], [np.inf, dynamic_cap])
-)
-                glam_corr_lengths[corr_len_key] = popt[1]
+                # NEW: Clean bounds. A >= 0, kappa >= 0. No dynamic cap needed!
+                popt, _ = curve_fit(exp_decay_rate, r_fit, h_fit, p0=initial_guess, maxfev=1000, 
+                                    ftol=1e-3, method='trf', bounds=([0, 0], [np.inf, np.inf]))
+                
+                glam_inv_corr_lengths[inv_corr_len_key] = popt[1] # This is kappa!
                 
             except (RuntimeError, ValueError) as e:
-                glam_corr_lengths[corr_len_key] = np.nan
-    return glam_corr_lengths
+                glam_inv_corr_lengths[inv_corr_len_key] = np.nan
+                
+    return glam_inv_corr_lengths
 
 
 def calculate_glam_coordination_number(rdf_df, num_levels, level_counts, total_roi_voxels):
@@ -2239,7 +2123,6 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
                 finite_disorder_idx = disorder_idx[finite_mask]
                 
                 if finite_disorder_idx.size > 0:
-                    # --- NEW: THERMODYNAMIC WEIGHTED AVERAGE ---
                     # Weight the average by the absolute structural difference
                     # This mathematically assigns a weight of 0 to asymptotic noise
                     weights = np.abs(log_diff[finite_mask])
@@ -3816,3 +3699,121 @@ def _calculate_glam_shape_matrices_cpu(structured_image, num_levels, spacing):
 
     return feats
 
+
+# def calculate_js_divergence_matrix(rdf_df, num_levels):
+#     """
+#     Calculates the symmetric Jensen-Shannon (JS) Divergence Anisotropy Matrix 
+#     by comparing RDF_ij and RDF_ji. Applies exp(-lambda * r) spatial damping.
+#     """
+#     js_features = {}
+#     if rdf_df.empty: return {}
+    
+#     r = rdf_df['r'].values
+
+#     def safe_kl(p, q):
+#         """Native KL divergence that safely handles 0 * log(0) = 0"""
+#         mask = p > 0
+#         out = np.zeros_like(p)
+#         # Using log2 bounds the final JS divergence strictly between 0 and 1
+#         out[mask] = p[mask] * np.log2(p[mask] / q[mask])
+#         return np.sum(out)
+
+#     for i in range(num_levels):
+#         for j in range(num_levels):
+#             # The diagonal is perfectly symmetric with itself
+#             if i == j:
+#                 js_features[f'GLAM_JSDivergence_{i}_{j}'] = 0.0
+#                 continue
+            
+#             key_ij = f'g_{i}_{j}'
+#             key_ji = f'g_{j}_{i}'
+            
+#             if key_ij in rdf_df.columns and key_ji in rdf_df.columns:
+#                 # 2. Apply damping envelope to raw RDF curves
+#                 P_raw = np.nan_to_num(rdf_df[key_ij].values) 
+#                 Q_raw = np.nan_to_num(rdf_df[key_ji].values) 
+                
+#                 sum_P = np.sum(P_raw)
+#                 sum_Q = np.sum(Q_raw)
+                
+#                 # If both are physical vacuums, they have 0 structural disagreement
+#                 if sum_P == 0 and sum_Q == 0:
+#                     js_features[f'GLAM_JSDivergence_{i}_{j}'] = 0.0
+#                     continue
+                    
+#                 # 3. L1 Re-normalization (Mandatory for probability distributions)
+#                 P = P_raw / sum_P if sum_P > 0 else np.zeros_like(P_raw)
+#                 Q = Q_raw / sum_Q if sum_Q > 0 else np.zeros_like(Q_raw)
+                
+#                 # 4. Calculate Shared Midpoint M
+#                 M = 0.5 * (P + Q)
+                
+#                 # 5. Calculate JS Divergence
+#                 js_val = 0.5 * safe_kl(P, M) + 0.5 * safe_kl(Q, M)
+#                 js_features[f'GLAM_JSDivergence_{i}_{j}'] = js_val
+#             else:
+#                 js_features[f'GLAM_JSDivergence_{i}_{j}'] = np.nan
+                
+#     return js_features
+
+# def calculate_cumulative_js_matrix(rdf_df, num_levels):
+#     """
+#     Calculates a 'Wasserstein-smoothed' JS Divergence Matrix.
+#     Instead of comparing local density g(r), it compares the Cumulative Coordination 
+#     profiles N(R) using the JS Divergence, resulting in a much smoother anisotropy matrix.
+#     """
+#     js_features = {}
+#     if rdf_df.empty: return {}
+    
+#     r = rdf_df['r'].values
+
+#     def safe_kl(p, q):
+#         """Native KL divergence that safely handles 0 * log(0) = 0"""
+#         mask = p > 0
+#         out = np.zeros_like(p)
+#         out[mask] = p[mask] * np.log2(p[mask] / q[mask])
+#         return np.sum(out)
+
+#     for i in range(num_levels):
+#         for j in range(num_levels):
+#             # The diagonal is perfectly symmetric with itself
+#             if i == j:
+#                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = 0.0
+#                 continue
+            
+#             key_ij = f'g_{i}_{j}'
+#             key_ji = f'g_{j}_{i}'
+            
+#             if key_ij in rdf_df.columns and key_ji in rdf_df.columns:
+#                 # 1. Get raw screened signals (incorporating spherical volume element r^2)
+#                 # This matches the core of the Wasserstein integrand
+#                 P_shell = np.nan_to_num(rdf_df[key_ij].values) * (r**2)
+#                 Q_shell = np.nan_to_num(rdf_df[key_ji].values) * (r**2)
+                
+#                 # 2. Convert to Cumulative Profiles (The "Wasserstein" smoothing step)
+#                 # We use cumulative_trapezoid to build a smooth, monotonically increasing curve
+#                 P_cumul = scipy.integrate.cumulative_trapezoid(P_shell, r, initial=0)
+#                 Q_cumul = scipy.integrate.cumulative_trapezoid(Q_shell, r, initial=0)
+                
+#                 sum_P = np.sum(P_cumul)
+#                 sum_Q = np.sum(Q_cumul)
+                
+#                 # If both are physical vacuums, they have 0 structural disagreement
+#                 if sum_P == 0 and sum_Q == 0:
+#                     js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = 0.0
+#                     continue
+                    
+#                 # 3. L1 Re-normalization of the CUMULATIVE profiles
+#                 P = P_cumul / sum_P if sum_P > 0 else np.zeros_like(P_cumul)
+#                 Q = Q_cumul / sum_Q if sum_Q > 0 else np.zeros_like(Q_cumul)
+                
+#                 # 4. Calculate Shared Midpoint M
+#                 M = 0.5 * (P + Q)
+                
+#                 # 5. Calculate JS Divergence on the smoothed profiles
+#                 js_val = 0.5 * safe_kl(P, M) + 0.5 * safe_kl(Q, M)
+#                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = js_val
+#             else:
+#                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = np.nan
+                
+#     return js_features

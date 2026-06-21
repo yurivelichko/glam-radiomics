@@ -27,5 +27,5 @@ Key Advantages
 --------------
 * **Fully Standalone Engine**: Built-in, natively optimized 3D extraction for shape, first-order, and conventional texture matrices with dynamic trimming—no external radiomics dependencies required.
 * **Physically Interpretable**: Translates image voxels into interacting particles to measure properties like "Effective Structural Temperature", "Pressure Virial", and "Volumetric Laplacians" (Stress).
-* **Soft Matter Descriptors**: Unique capabilities to measure directional tissue organization using the global and local **Nematic Order Parameter (S)** and Orientational Correlation Lengths.
+* **Soft Matter Descriptors**: Unique capabilities to measure directional tissue organization using the global and local **Nematic Order Parameter (S)** and Inverse Correlation Lengths (Decay Rates).
 * **3D Feature Mapping**: Integrated sliding-window architecture to generate voxel-wise NIfTI feature maps, allowing for direct visual assessment of the tumor's "affinity landscape."
