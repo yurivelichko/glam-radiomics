@@ -17,6 +17,7 @@ Use the Table of Contents below or in the sidebar to navigate through the theore
    :maxdepth: 2
    :caption: Theory & Background
 
+   theory/original_radiomics
    theory/statistical_mechanics
    theory/geometric_classes
 
