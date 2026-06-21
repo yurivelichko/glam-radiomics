@@ -86,17 +86,26 @@ The matrix element :math:`P(i,j)` represents the number of voxels with gray-leve
 * **Interpretation**: GLDM measures the "coarseness" of a texture. High dependence (large :math:`j` values) indicates that voxels exist in large, homogenous neighborhoods.
 
 
-Dynamic Matrix Trimming in GLAM
--------------------------------
-A fundamental issue in conventional radiomics software is memory inefficiency. In a large tumor, a GLSZM might theoretically need 50,000 columns to account for the largest possible zone size, resulting in a matrix that is 99.9% empty zeroes.
+Neighborhood Gray-Tone Difference Matrix (NGTDM)
+------------------------------------------------
+The NGTDM evaluates the spatial heterogeneity of an image by quantifying the difference between a voxel's gray level and the average gray level of its immediate 3D neighborhood. 
 
-**GLAM natively solves this using Dynamic Matrix Trimming.** During GPU extraction, GLAM precisely tracks the maximum run length or zone size actually present in the specific tumor. It then dynamically truncates the matrix columns right after the final data point. This significantly accelerates downstream feature extraction (like Entropy and Energy calculations) and dramatically reduces memory overhead without losing a single drop of mathematical precision.
+The element :math:`s(i)` is calculated as the sum of absolute differences between all voxels with gray-level :math:`i` and their respective neighborhood averages.
+
+.. math::
+
+   s(i) = \sum_{k=1}^{N_i} \left| i - \bar{A}_k \right|
+
+where :math:`N_i` is the number of voxels with gray level :math:`i`, and :math:`\bar{A}_k` is the average gray level of the neighborhood surrounding the :math:`k`-th voxel.
+
+* **Interpretation**: The NGTDM is designed to directly capture human visual perceptions of texture. High values correspond to "busy" or high-contrast textures with rapid spatial intensity changes. Low values indicate smooth, homogeneous biological regions where voxels closely resemble their neighbors.
+
 
 Log10 Transformation and Normalization
 --------------------------------------
 Standard radiomic matrices often exhibit an extreme dynamic range. For instance, a homogeneous background or dominant core might cause certain co-occurrences or zone sizes to reach counts in the millions, while subtle, critical tumor textures occur only a few dozen times. Left untreated, these massive numerical spikes completely overshadow the rest of the feature space.
 
-To resolve this, logarithmic transformations (such as the :math:`\log_{10}` or natural log :math:`\ln` scales seen in the figures above) are regularly applied to the raw matrix counts:
+To resolve this, logarithmic transformations (such as the :math:`\log_{10}` or natural log :math:`\ln` scales seen in the figures above) are regularly applied to the raw matrix counts in GLAM radiomics:
 
 .. math::
 
@@ -105,3 +114,9 @@ To resolve this, logarithmic transformations (such as the :math:`\log_{10}` or n
 * **Visual Clarity**: By compressing the dynamic range, the log transformation acts as a visual equalizer. It reveals intricate, low-frequency structural details (like rare long-runs in the GLRLM or off-diagonal interactions in the GLCM) that would otherwise be entirely invisible next to massive background peaks.
 * **Algorithmic Stability**: Downstream machine learning models are highly sensitive to unscaled data. Log-normalization strictly prevents features with massive raw counts from dominating gradient updates or distance calculations during model training.
 * **Statistical Normality**: The transformation converts highly skewed, heavy-tailed raw count distributions into more symmetric, Gaussian (normal) profiles, fundamentally satisfying the strict assumptions required by standard parametric statistical tests.
+
+Dynamic Matrix Trimming in GLAM
+-------------------------------
+A fundamental issue in conventional radiomics software is memory inefficiency. In a large tumor, a GLSZM might theoretically need 50,000 columns to account for the largest possible zone size, resulting in a matrix that is 99.9% empty zeroes.
+
+**GLAM natively solves this using Dynamic Matrix Trimming.** During GPU extraction, GLAM precisely tracks the maximum run length or zone size actually present in the specific tumor. It then dynamically truncates the matrix columns right after the final data point. This significantly accelerates downstream feature extraction (like Entropy and Energy calculations) and dramatically reduces memory overhead without losing a single drop of mathematical precision.
