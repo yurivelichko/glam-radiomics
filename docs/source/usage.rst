@@ -16,16 +16,15 @@ A typical configuration file is structured as follows:
     # Number of parallel patient folders to process simultaneously.
     # CRITICAL: If using GPU Acceleration (CuPy), this dictates how many 
     # matrices are loaded into VRAM. 
-    # Recommendation for 4GB-8GB GPUs: NumWorkers = 2 to 4
-    # Recommendation for CPU-only: NumWorkers ~ 2 * Number of CPU Cores
-    NumWorkers = 8
+    # For NumWorkers = 1, the system requires a 4–6 core CPU and a 4 GB GPU
+    NumWorkers = 1
 
     [GLAM_Settings]
     MaxRdfRadius = 100
     AnisotropyCutoffRadius = 5
-    MaxLocalShellRadius = 25
+    MaxLocalShellRadius = 30
     NumRandomisations = 4
-    RdfSamplePoints = 100
+    RdfSamplePoints = 1000
 
     # QuantizationMethod can be "FixedCount" (for MRI) or "FixedWidth" (for CT)
     QuantizationMethod = FixedCount
@@ -171,7 +170,23 @@ Tuning the Local Shell Radius
 -----------------------------
 The ``MaxLocalShellRadius`` parameter acts as a biophysical circuit breaker for thermodynamic features like the Coordination Number and Configurational Disorder Index. In statistical physics, these metrics evaluate the immediate, local microenvironment (the "First Coordination Sphere"). 
 
-If a specific tissue interaction (e.g., a necrotic core to an edematous rim) does not form a localized cluster within this maximum radius, GLAM correctly identifies the interaction as a macroscopic gradient rather than a local topological shell, and will safely abort the local thermodynamic integration. The default of ``15`` is optimized for standard 1mm isotropic medical imaging. If you are applying GLAM to microscopic histology or ultra-high-resolution scans where local cell clusters span dozens of voxels, you should increase this parameter accordingly.
+Because GLAM integrals can mathematically diverge if they hit the boundary of a finite system (the macroscopic edge of the tumor), this parameter forces the algorithm to stop searching for local texture once it crosses into "macroscopic shape" territory.
+
+**Standard MRI Recommendation (MaxLocalShellRadius = 30)**
+For standard macroscopic oncology scans (e.g., 1mm isotropic MRI), empirical topological audits show that a radius of ``30`` (representing 3 centimeters) is the ideal "Goldilocks Zone":
+
+* **0 to 15 Bins:** Captures tightly packed, localized tissue clusters (e.g., dense necrosis).
+* **15 to 30 Bins:** Captures complex "Halo" or "Ring" structures (e.g., a necrotic core repelling an active rim of angiogenesis).
+* **> 30 Bins:** Successfully aborts integration, preventing whole-organ macroscopic gradients (like 6-centimeter fields of edema or the boundary of the skull) from corrupting the local thermodynamic math.
+
+**Optimizing for Other Modalities**
+It is critical to remember that ``MaxLocalShellRadius`` is measured in **Distance Bins (Voxels)**, not physical millimeters. You must scale this parameter based on the physical resolution of your modality and the biological scale of the tumor:
+
+* **CT or PET Scans (Lower Resolution):** If your scan has a highly anisotropic or coarse spacing (e.g., 2mm or 3mm voxels), a value of ``30`` would represent 6 to 9 centimeters, which is too large. You should lower the parameter (e.g., ``10`` to ``15``) to maintain a physical search window of roughly ~3 centimeters.
+* **Digital Pathology / Histology (Ultra-High Resolution):** At the microscopic level, voxels represent micrometers. A 3cm radius would encompass the entire slide. You should tune this parameter to the physical size of localized cell clusters or glandular structures (e.g., ``50`` to ``200`` pixels).
+
+**Pro-Tip: How to Audit Your Own Dataset**
+If you are unsure what to set this parameter to, run GLAM on a few sample images and extract the ``GLAM_RDF_PeakPosition_matrix.csv``. This matrix explicitly tells you where the "crests" of every tissue interaction occur. Set your ``MaxLocalShellRadius`` to a value just slightly larger than the distance of your furthest complex texture rings, but smaller than the massive macroscopic peaks caused by the organ's boundary.
 
 Output Files
 ------------

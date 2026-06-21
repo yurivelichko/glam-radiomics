@@ -752,8 +752,8 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
                     if shell_volume > 0:
                         rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
 
-    # Clean up GPU memory
-    cp.get_default_memory_pool().free_all_blocks()
+        # Clean up GPU memory
+        cp.get_default_memory_pool().free_all_blocks()
 
     df_data = []
     for r in range(1, max_radius + 1):
@@ -2177,7 +2177,7 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
     try:
         max_shell_radius = int(get_config('MaxLocalShellRadius'))
     except Exception:
-        max_shell_radius = 15
+        max_shell_radius = 30
         
     config_disorder_indices = {}
     if rdf_structured_df.empty or rdf_random_df.empty: return config_disorder_indices
@@ -2235,10 +2235,20 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
                 with np.errstate(divide='ignore', invalid='ignore'):
                     disorder_idx = log_g_struct / log_diff
                 
-                finite_disorder_idx = disorder_idx[np.isfinite(disorder_idx)]
+                finite_mask = np.isfinite(disorder_idx)
+                finite_disorder_idx = disorder_idx[finite_mask]
                 
                 if finite_disorder_idx.size > 0:
-                    config_disorder_indices[index_key] = np.mean(finite_disorder_idx)
+                    # --- NEW: THERMODYNAMIC WEIGHTED AVERAGE ---
+                    # Weight the average by the absolute structural difference
+                    # This mathematically assigns a weight of 0 to asymptotic noise
+                    weights = np.abs(log_diff[finite_mask])
+                    
+                    if np.sum(weights) > 1e-9:
+                        config_disorder_indices[index_key] = np.average(finite_disorder_idx, weights=weights)
+                    else:
+                        config_disorder_indices[index_key] = np.nan
+                    # -------------------------------------------
                 else:
                     config_disorder_indices[index_key] = np.nan
                     

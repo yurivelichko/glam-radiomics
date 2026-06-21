@@ -14,7 +14,7 @@ or
 ```Plaintext
 pip install glam-radiomics
 ```
-Note: This release (v1.2.8) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
+Note: This release (v1.3.0) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
 
 GPU Acceleration (Optional but Recommended): > GLAM features automatic GPU-accelerated matrix batching for massive speed improvements. To enable this, you must install CuPy. It is highly recommended to install the pre-compiled binary wheel that matches your system's NVIDIA CUDA version (e.g., pip install cupy-cuda12x) rather than running pip install cupy, which requires a complex C++ build environment and can cause installation failures.
 
@@ -40,16 +40,15 @@ A typical configuration file is structured as follows:
 # Number of parallel patient folders to process simultaneously.
 # CRITICAL: If using GPU Acceleration (CuPy), this dictates how many 
 # matrices are loaded into VRAM. 
-# Recommendation for 4GB-8GB GPUs: NumWorkers = 2 to 4
-# Recommendation for CPU-only: NumWorkers ~ 2 * Number of CPU Cores
-NumWorkers = 4
+# For NumWorkers = 1, the system requires a 4–6 core CPU and a 4 GB GPU
+NumWorkers = 1
 
 [GLAM_Settings]
 MaxRdfRadius = 100
 AnisotropyCutoffRadius = 5
-MaxLocalShellRadius = 15
+MaxLocalShellRadius = 30
 NumRandomisations = 4
-RdfSamplePoints = 100
+RdfSamplePoints = 1000
 
 # QuantizationMethod can be "FixedCount" (for MRI) or "FixedWidth" (for CT)
 QuantizationMethod = FixedCount
