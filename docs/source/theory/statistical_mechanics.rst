@@ -32,12 +32,12 @@ To capture the extensive information embedded in the full RDF curves without inc
 
    **Figure:** RDF Median matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
-.. figure:: /_static/GLAM_LogRDF_Skewness.png
+.. figure:: /_static/GLAM_RDF_PeakPosition.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
 
-   **Figure:** RDF Skewness matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+   **Figure:** RDF Peak Position matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
 
 .. figure:: /_static/GLAM_RDF_DispersionRatio_Ln.png
