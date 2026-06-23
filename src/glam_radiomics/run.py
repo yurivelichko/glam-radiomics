@@ -63,7 +63,7 @@ from .utils import (
 # === HELPER FUNCTIONS ===
 # =============================================================================
 
-def perform_quantization(image_array, mask_array, method, num_levels, q_min=None, q_max=None, bin_width=None):
+def perform_quantization(image_array, mask_array, method, num_levels, q_min=None, q_max=None, bin_width=None, global_min=None, global_max=None):
     """
     Prepares rescaled and quantized images for GLAM analysis.
     Supports FixedCount (MRI) and FixedWidth (CT).
@@ -79,8 +79,13 @@ def perform_quantization(image_array, mask_array, method, num_levels, q_min=None
 
     if method == 'fixedcount':
             # --- Robust Percentile Clipping to ignore extreme outliers ---
-            image_min = np.percentile(roi_voxels, 1.0)
-            image_max = np.percentile(roi_voxels, 99.0)
+            # Use global Whole Tumor bounds if provided, otherwise compute locally
+            if global_min is not None and global_max is not None:
+                image_min = global_min
+                image_max = global_max
+            else:
+                image_min = np.percentile(roi_voxels, 1.0)
+                image_max = np.percentile(roi_voxels, 99.0)
             
             # Clip the extreme voxels to these new, biologically relevant bounds
             clipped_voxels = np.clip(roi_voxels, image_min, image_max)
@@ -592,6 +597,31 @@ def process_single_scan(prefix, paths, output_dir, config_path):
         print(f"  - WARNING: Skipping scan {prefix}. Unknown mask format.")
         return [], []
 
+    # --- NEW: Precompute global intensity bounds (Whole Tumor) for Habitat consistency ---
+    method = get_config('QuantizationMethod').lower()
+    global_bounds = {}
+
+    if method == 'fixedcount':
+        print("  - Precomputing global intensity bounds (Whole Tumor) for consistent quantization...")
+        whole_tumor_mask_sitk = generate_binary_mask(multilabel_mask_sitk, 99)
+        wt_mask_array = sitk.GetArrayFromImage(whole_tumor_mask_sitk)
+
+        for seq_name, image_path in image_paths_dict.items():
+            try:
+                img_sitk = sitk.ReadImage(image_path, sitk.sitkFloat32)
+                img_arr = sitk.GetArrayFromImage(img_sitk)
+                wt_voxels = img_arr[wt_mask_array > 0]
+
+                if wt_voxels.size > 0:
+                    seq_min = np.percentile(wt_voxels, 1.0)
+                    seq_max = np.percentile(wt_voxels, 99.0)
+                    global_bounds[seq_name] = (seq_min, seq_max)
+                else:
+                    global_bounds[seq_name] = (None, None)
+            except Exception as e:
+                print(f"  - WARNING: Could not precompute bounds for {seq_name}: {e}")
+    # -----------------------------------------------------------------------------------
+
     for label_id, label_name in labels_to_process.items():
         print(f"  --- Processing Label: {label_name} ({label_id}) ---")
         
@@ -612,9 +642,13 @@ def process_single_scan(prefix, paths, output_dir, config_path):
 
             output_prefix = f"{prefix}_{label_name}_{seq_name}"
             try:
+                # Fetch the precomputed global bounds for this sequence
+                g_min, g_max = global_bounds.get(seq_name, (None, None))
+
                 primary_row, meta_row = process_single_label(
                     output_prefix, image_sitk, binary_mask_sitk,
-                    label_id, label_name, seq_name, output_dir, config_path
+                    label_id, label_name, seq_name, output_dir, config_path,
+                    global_min=g_min, global_max=g_max  
                 )
                 if primary_row and meta_row:
                     primary_rows_list.append(primary_row)
@@ -625,7 +659,7 @@ def process_single_scan(prefix, paths, output_dir, config_path):
 
     return primary_rows_list, meta_rows_list
 
-def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_name, seq_name, output_dir, config_path):
+def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_name, seq_name, output_dir, config_path, global_min=None, global_max=None):
     """
     Processes a single image/label pair using Custom Radiomics + GLAM.
     """
@@ -660,7 +694,8 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
 
         # Pass the new arguments here
         prep_data = perform_quantization(
-            image_array, mask_array, method, num_gray_levels, q_min, q_max, bin_width
+            image_array, mask_array, method, num_gray_levels, q_min, q_max, bin_width,
+            global_min=global_min, global_max=global_max
         )
         if not prep_data: return None, None
         

@@ -113,13 +113,19 @@ Image Quantization Methods
 To calculate texture and GLAM matrices, continuous image intensities must first be discretized into discrete bins (gray levels). GLAM supports two primary quantization methods depending on your imaging modality.
 
 **1. Fixed Bin Count (MRI)**
-Recommended for MRI, where intensity values are relative and lack an absolute physical meaning. This method rescales the Region of Interest (ROI) intensities directly into a fixed number of bins, :math:`N_g` (``NumGrayLevels``).
+Recommended for MRI, where intensity values are relative and lack an absolute physical meaning[cite: 82].
+This method rescales the Region of Interest (ROI) intensities directly into a fixed number of bins, :math:`N_g` (``NumGrayLevels``)[cite: 83].
 
 .. math::
    X_{d} = \left\lfloor \frac{I - I_{min}}{I_{max} - I_{min}} \times N_g \right\rfloor
 
-Where :math:`I_{min}` and :math:`I_{max}` are the minimum and maximum intensities within the ROI. To ensure the absolute maximum intensity (:math:`I = I_{max}`) does not fall out of bounds, the final discrete value :math:`X_d` is capped at :math:`N_g - 1`. This produces a 0-indexed range from :math:`0` to :math:`N_g - 1`.
+Where :math:`I_{min}` and :math:`I_{max}` are the minimum and maximum intensities within the ROI[cite: 84].
+To ensure the absolute maximum intensity (:math:`I = I_{max}`) does not fall out of bounds, the final discrete value :math:`X_d` is capped at :math:`N_g - 1`[cite: 85].
+This produces a 0-indexed range from :math:`0` to :math:`N_g - 1`[cite: 86].
 
+.. important::
+   **Habitat Radiomics Consistency:** When performing multi-region analysis, computing :math:`I_{min}` and :math:`I_{max}` *locally* for each individual sub-region (e.g., the necrotic core versus the enhancing rim) would cause the physical meaning of the gray levels to shift dramatically between habitats, making texture comparisons invalid. To solve this, GLAM automatically pre-computes the 1st and 99th percentiles of the **Whole Tumor** and uses these global bounds to lock the quantization scale across all individual habitats analyzed in that scan.
+   
 **2. Fixed Bin Width (CT)**
 Recommended for CT scans, where Hounsfield Units (HU) represent absolute physical densities (e.g., water = 0 HU, bone = ~1000 HU). Using a fixed bin count on CTs would destroy this absolute density mapping. Instead, this method clips the image to a defined range :math:`[Q_{min}, Q_{max}]` and divides the intensities into bins of a fixed physical width, :math:`W` (``BinWidth``).
 
