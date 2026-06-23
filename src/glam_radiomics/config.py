@@ -56,7 +56,11 @@ def load_config(config_path):
         parsed['LabelMapping'] = {int(k): v for k, v in _label_mapping_str.items()}
         
         _labels_for_analysis_str = json.loads(config.get('Label_Mapping', 'LabelsForAnalysis'))
-        parsed['LabelsForAnalysis'] = {int(k): v for k, v in _labels_for_analysis_str.items()}
+        
+        def parse_label_key(k):
+            return str(k) if '+' in str(k) else int(k)
+            
+        parsed['LabelsForAnalysis'] = {parse_label_key(k): v for k, v in _labels_for_analysis_str.items()}
 
         # Algorithm_Parameters
         parsed['SavgolWindow'] = config.getint('Algorithm_Parameters', 'SavgolWindow')

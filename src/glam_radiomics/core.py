@@ -51,8 +51,15 @@ def calculate_glcm_3d(image, num_gl):
     glcm_symmetric = glcm + glcm.T
     total = cp.sum(glcm_symmetric)
     
-    if total == 0: return np.zeros((num_gl, num_gl), dtype=float)
-    return (glcm_symmetric.astype(cp.float64) / float(total)).get()
+    if total == 0: 
+        res = np.zeros((num_gl, num_gl), dtype=float)
+    else:
+        res = (glcm_symmetric.astype(cp.float64) / float(total)).get()
+        
+    del image_gpu, img_curr, img_next, mask, glcm, glcm_symmetric
+    cp.get_default_memory_pool().free_all_blocks()
+    
+    return res
 
 def _calculate_glcm_3d_cpu(image, num_gl):
     """Fallback CPU function for GLCM."""
@@ -106,6 +113,10 @@ def calculate_glrlm_3d(image, num_gl):
             glrlm[g-1, length_indices[valid_mask] - 1] += valid_counts[valid_mask].astype(cp.uint32)
 
     glrlm_cpu = glrlm.get()
+    
+    del image_gpu, glrlm
+    cp.get_default_memory_pool().free_all_blocks()
+    
     if np.sum(glrlm_cpu) == 0: return np.zeros((num_gl, 1), dtype=float)
     
     col_sums = np.sum(glrlm_cpu, axis=0)
@@ -170,6 +181,10 @@ def calculate_glszm_3d(image, num_gl):
         glszm[g-1, unique - 1] += counts.astype(cp.uint32)
 
     glszm_cpu = glszm.get()
+    
+    del image_gpu, glszm, structure_3d
+    cp.get_default_memory_pool().free_all_blocks()
+    
     if np.sum(glszm_cpu) == 0: return np.zeros((num_gl, 1), dtype=float)
     
     col_sums = np.sum(glszm_cpu, axis=0)
@@ -219,7 +234,12 @@ def calculate_gldm_3d(image, num_gl, alpha=0):
             gldm[g-1, unique] += u_counts.astype(cp.uint32)
             
     gldm_cpu = gldm.get()
+    
+    del image_gpu, gldm, footprint
+    cp.get_default_memory_pool().free_all_blocks()
+    
     if np.sum(gldm_cpu) == 0: return np.zeros((num_gl, 1), dtype=float)
+
     col_sums = np.sum(gldm_cpu, axis=0)
     last_idx = np.max(np.where(col_sums > 0)[0]) if np.any(col_sums) else 0
     gldm_cpu = gldm_cpu[:, :last_idx+1]
@@ -277,7 +297,12 @@ def calculate_ngtdm_3d(image, num_gl):
         ngtdm[g-1, 1] = s_i
 
     ngtdm_cpu = ngtdm.get()
+    
+    del image_gpu, mask_gpu, neighbor_count_map, valid_neighborhood, sum_neighbor_vals, avg_neighbor_map, diff_map
+    cp.get_default_memory_pool().free_all_blocks()
+    
     total_n = np.sum(ngtdm_cpu[:, 0])
+    
     if total_n > 0: ngtdm_cpu[:, 2] = ngtdm_cpu[:, 0] / total_n
     return ngtdm_cpu
 
@@ -541,6 +566,17 @@ def calculate_shape_features_3d(mask_sitk, prefix):
     mask_arr = sitk.GetArrayFromImage(mask_sitk)
     spacing = mask_sitk.GetSpacing() # (x, y, z)
     
+    # Crop mask to bounding box with padding to prevent marching_cubes segfaults
+    from scipy import ndimage
+    slices = ndimage.find_objects((mask_arr > 0).astype(int))
+    if slices:
+        z_s, y_s, x_s = slices[0]
+        mask_arr = mask_arr[
+            max(0, z_s.start-2):min(mask_arr.shape[0], z_s.stop+2),
+            max(0, y_s.start-2):min(mask_arr.shape[1], y_s.stop+2),
+            max(0, x_s.start-2):min(mask_arr.shape[2], x_s.stop+2)
+        ]
+    
     # Note: numpy is (z,y,x), spacing is (x,y,z). 
     # marching_cubes expects spacing in the order of the dimensions (z,y,x).
     spacing_zyx = spacing[::-1] 
@@ -619,9 +655,15 @@ def calculate_shape_features_3d(mask_sitk, prefix):
     # Calculating distance between Hull vertices is much faster.
     if len(voxel_coords) > 3:
         try:
-            # Re-use physical coords
-            hull = ConvexHull(physical_coords)
-            hull_points = physical_coords[hull.vertices]
+            # Downsample massive whole-organ masks to prevent CPU hanging
+            if len(physical_coords) > 25000:
+                indices = np.random.choice(len(physical_coords), 25000, replace=False)
+                hull_coords = physical_coords[indices]
+            else:
+                hull_coords = physical_coords
+                
+            hull = ConvexHull(hull_coords)
+            hull_points = hull_coords[hull.vertices]
             
             # Calculate pairwise distances between hull vertices
             # pdist returns condensed distance matrix
@@ -654,7 +696,14 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         print("  > DEBUG: No GPU detected. Falling back to CPU cKDTree RDF calculation.")
         return _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
                                      total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask)
-        
+
+    # Query GPU Memory to determine safe batch size
+    dev = cp.cuda.Device(0)
+    free_mem, _ = dev.mem_info
+    
+    # We leave a 50% safety buffer for VRAM overhead
+    safe_vram_bytes = free_mem * 0.5 
+
     # 2. Define ALL potential neighbors (The "System")
     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
     
@@ -663,13 +712,6 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
     
     rdf_data = defaultdict(lambda: defaultdict(float))
     
-    # Query GPU Memory to determine safe batch size
-    dev = cp.cuda.Device(0)
-    free_mem, _ = dev.mem_info
-    
-    # We leave a 50% safety buffer for VRAM overhead
-    safe_vram_bytes = free_mem * 0.5 
-
     for alpha in range(num_levels):
         if level_counts[alpha] == 0: continue
         

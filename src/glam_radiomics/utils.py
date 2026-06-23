@@ -100,19 +100,16 @@ def find_scan_mask_pairs(directory):
 def generate_binary_mask(multilabel_mask_sitk, label_id):
     """
     Generates a binary SITK mask for a specific label_id.
-    Handles the special '99' (Whole_Tumor) case by creating a union.
+    Handles '99' (Whole_Tumor) and composite labels like '1+2' via union.
     """
-    # --- Get param inside the function ---
     all_label_definitions = get_config('LabelMapping')
-    # ---
 
-    if label_id == 99:
+    if label_id == 99 or str(label_id) == '99':
         tumor_component_labels = [k for k in all_label_definitions.keys() if k != 99]
         binary_masks = [(multilabel_mask_sitk == l) for l in tumor_component_labels]
         
-        if not binary_masks: # Handle case where no tumor labels are defined
-            print("  - WARNING: 'Whole_Tumor' (99) requested, but no tumor component labels (1, 2, 4...) are in config's LabelMapping.")
-            # Return an empty mask
+        if not binary_masks: 
+            print("  - WARNING: 'Whole_Tumor' (99) requested, but no tumor component labels are in config.")
             return sitk.Image(multilabel_mask_sitk.GetSize(), sitk.sitkUInt8)
 
         final_binary_mask = binary_masks[0]
@@ -121,10 +118,21 @@ def generate_binary_mask(multilabel_mask_sitk, label_id):
             
         return final_binary_mask
         
+    elif isinstance(label_id, str) and '+' in label_id:
+        # Handle custom composite habitats like "1+2"
+        components = [int(l.strip()) for l in label_id.split('+')]
+        binary_masks = [(multilabel_mask_sitk == l) for l in components]
+        
+        final_binary_mask = binary_masks[0]
+        for i in range(1, len(binary_masks)):
+            final_binary_mask = sitk.Or(final_binary_mask, binary_masks[i])
+            
+        return final_binary_mask
+        
     else:
-        # Standard case: just select voxels matching the label_id
-        return (multilabel_mask_sitk == label_id)    
-
+        # Standard single-label case
+        return (multilabel_mask_sitk == int(label_id))
+    
 def reformat_dict_to_matrix(glam_dict, num_levels, key_prefix, diag_prefix=None):
     """Helper to reformat a flat dictionary of GLAM features into a matrix."""
     matrix = np.full((num_levels, num_levels), np.nan)

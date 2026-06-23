@@ -57,7 +57,16 @@ A typical configuration file is structured as follows:
         "99": "Whole_Tumor"
         }
 
+    # Available habitats you can swap in:
+    # "1": "Enhancing_Tumor"
+    # "1+2": "Tumor_Core",
+    # "1+4": "Enhancing_and_Edema"
+    # "99": "Whole_Tumor"
+
     LabelsForAnalysis = {
+        "1": "Enhancing_Tumor"
+        "1+2": "Tumor_Core",
+        "1+4": "Enhancing_and_Edema"
         "99": "Whole_Tumor"
         }
 
@@ -72,6 +81,32 @@ Key settings include:
 * **Radiomics_Settings**: Ensures parity with conventional libraries by setting matching bin counts.
 * **File_Naming**: Uses identifiers to automatically pair MRI sequences (T1, T1c, T2, FLAIR) with their corresponding tumor masks.
 * **Label_Mapping**: Maps voxel values to biological compartments, such as the **Whole Tumor** or **Enhancing Tumor**.
+
+Habitat Radiomics (Multi-Region Analysis)
+-----------------------------------------
+GLAM natively supports **Habitat Radiomics**, allowing you to merge discrete tumor sub-regions (e.g., enhancing core and necrotic core) into unified functional habitats on the fly. You do not need to pre-process or manually merge your NIfTI masks.
+
+This is controlled using the ``LabelsForAnalysis`` dictionary in your configuration file. By using a ``+`` symbol between label integers, GLAM will automatically perform a Boolean Union on the GPU to isolate that specific habitat.
+
+.. code-block:: ini
+
+    [Label_Mapping]
+    # Define the raw integer values found in your NIfTI mask
+    LabelMapping = {
+        "1": "Enhancing_Tumor",
+        "2": "Non_Enhancing_Tumor_Core",
+        "4": "Peritumoral_Edema"
+        }
+
+    # Define exactly which regions (or merged habitats) to analyze
+    LabelsForAnalysis = {
+        "1": "Enhancing_Tumor",           # Single region
+        "1+2": "Tumor_Core",              # Habitat: Enhancing + Necrotic
+        "1+4": "Enhancing_and_Edema"      # Habitat: Enhancing + Edema
+        }
+
+.. note::
+   If you define a habitat like ``"1+2": "Tumor_Core"`` and remove the individual labels from ``LabelsForAnalysis``, GLAM will strictly compute matrices and features for the unified ``Tumor_Core``, significantly saving computational time. Note that JSON does not support comments (``#``) inside these dictionary blocks.
 
 Image Quantization Methods
 --------------------------

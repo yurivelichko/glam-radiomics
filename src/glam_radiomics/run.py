@@ -525,65 +525,38 @@ def process_patient_folder_worker(patient_folder_tuple):
 # =============================================================================
 
 def process_scans(input_dir, output_dir, project_name="DefaultProject", config_path=None):
-    """Main processing loop (Orchestrator)."""
+    """Main processing loop (Orchestrator) - SYNCHRONOUS OVERRIDE."""
     all_primary_features = []
     all_meta_and_radiomics = []
 
-    try:
-        num_workers = get_config('NumWorkers')
-    except Exception:
-        print("Warning: 'NumWorkers' not found in config. Defaulting to 1.")
-        num_workers = 1
-        
     if config_path is None:
-        print("Error: 'config_path' was not passed to process_scans. Cannot initialize workers.")
+        print("Error: 'config_path' was not passed to process_scans.")
         return
 
     print("="*60)
     print(f"STARTING PROJECT: {project_name}")
     print(f"  Input:  {input_dir}")
     print(f"  Output: {output_dir}")
-    print(f"  Parallel Workers: {num_workers}")
+    print("  Execution: FORCED SYNCHRONOUS (Bypassing Windows OS Pool Bug)")
     print("="*60)
     
-    if not os.path.exists(input_dir):
-        print(f"Error: Input folder not found: {input_dir}")
-        return
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if not os.path.exists(input_dir): return
+    if not os.path.exists(output_dir): os.makedirs(output_dir)
 
     try:
         patient_folders = [f for f in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, f))]
     except Exception as e:
-        print(f"Error reading input directory {input_dir}: {e}")
         return
 
-    if not patient_folders:
-        print(f"  > DEBUG: No patient subfolders found in {input_dir}.")
-        return
-
-    tasks = []
+    _init_worker_config(config_path)
+    
     for patient_folder_name in patient_folders:
-        tasks.append( (patient_folder_name, input_dir, output_dir, project_name, config_path) ) 
+        task = (patient_folder_name, input_dir, output_dir, project_name, config_path)
+        primary_rows, meta_rows = process_patient_folder_worker(task)
+        if primary_rows: all_primary_features.extend(primary_rows)
+        if meta_rows: all_meta_and_radiomics.extend(meta_rows)
 
-    with ProcessPoolExecutor(max_workers=num_workers, 
-                             initializer=_init_worker_config, 
-                             initargs=(config_path,)) as executor:
-        
-        results = executor.map(process_patient_folder_worker, tasks)
-        
-        for primary_rows, meta_rows in results:
-            if primary_rows:
-                all_primary_features.extend(primary_rows)
-            if meta_rows:
-                all_meta_and_radiomics.extend(meta_rows)
-
-    print("="*60)
-    print("All patient folders processed. Saving combined feature files...")
-    save_feature_dataframes(
-        all_primary_features, all_meta_and_radiomics, output_dir
-    )
-    print("Processing complete.")
+    save_feature_dataframes(all_primary_features, all_meta_and_radiomics, output_dir)
 
 def process_single_scan(prefix, paths, output_dir, config_path):
     """Processes a single patient."""
@@ -671,6 +644,20 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
         mask_array = sitk.GetArrayFromImage(binary_mask_sitk)
         if image_array.shape != mask_array.shape: return None, None
 
+        # --- BOUNDING BOX CROP ---
+        from scipy import ndimage
+        slices = ndimage.find_objects((mask_array > 0).astype(int))
+        if slices:
+            z_s, y_s, x_s = slices[0]
+            pad = 2
+            z_start, z_end = max(0, z_s.start - pad), min(image_array.shape[0], z_s.stop + pad)
+            y_start, y_end = max(0, y_s.start - pad), min(image_array.shape[1], y_s.stop + pad)
+            x_start, x_end = max(0, x_s.start - pad), min(image_array.shape[2], x_s.stop + pad)
+            
+            image_array = image_array[z_start:z_end, y_start:y_end, x_start:x_end]
+            mask_array = mask_array[z_start:z_end, y_start:y_end, x_start:x_end]
+        # ----------------------------------
+
         # Pass the new arguments here
         prep_data = perform_quantization(
             image_array, mask_array, method, num_gray_levels, q_min, q_max, bin_width
@@ -689,12 +676,15 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
     # A. Shape
     shape_feats = calculate_shape_features_3d(binary_mask_sitk, "Radiomics.Original.Shape")
     radiomic_features.update(shape_feats)
+    print("Shape features calculated.")
 
     # B. First Order
     fo_feats = calculate_first_order_features(
         prep_data['rescaled_image_array'], mask_array, "Radiomics.Original.FirstOrder"
     )
     radiomic_features.update(fo_feats)
+    print("First Order features calculated.")
+
 
     # C. Texture Matrices
     texture_feats = process_custom_radiomics(
@@ -702,7 +692,8 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
         num_gray_levels, prefix, output_dir, baseline_name="Original"
     )
     radiomic_features.update(texture_feats)
-    
+    print("Radiomic features calculated.")
+
     # --- 3. Custom Radiomics (Randomized Baseline) ---
     print("  - Calculating Custom Radiomics (Randomized)...")
     roi_voxels = prep_data['quantized_image'][mask_array > 0]

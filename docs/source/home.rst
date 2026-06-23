@@ -29,3 +29,4 @@ Key Advantages
 * **Physically Interpretable**: Translates image voxels into interacting particles to measure properties like "Effective Structural Temperature", "Pressure Virial", and "Volumetric Laplacians" (Stress).
 * **Soft Matter Descriptors**: Unique capabilities to measure directional tissue organization using the global and local **Nematic Order Parameter (S)** and Inverse Correlation Lengths (Decay Rates).
 * **3D Feature Mapping**: Integrated sliding-window architecture to generate voxel-wise NIfTI feature maps, allowing for direct visual assessment of the tumor's "affinity landscape."
+* **Native Habitat Radiomics**: Seamlessly perform multi-region habitat analysis. GLAM can automatically perform Boolean operations to merge discrete sub-regions (e.g., combining enhancing and non-enhancing cores into a unified "Tumor Core") directly via the configuration file, eliminating the need for manual mask preprocessing.
