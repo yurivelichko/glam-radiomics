@@ -81,7 +81,16 @@ LabelMapping = {
     "99": "Whole_Tumor"
     }
 
+# Available habitats you can swap in:
+# "1": "Enhancing_Tumor"
+# "1+2": "Tumor_Core",
+# "1+4": "Enhancing_and_Edema"
+# "99": "Whole_Tumor"
+
 LabelsForAnalysis = {
+    "1": "Enhancing_Tumor"
+    "1+2": "Tumor_Core",
+    "1+4": "Enhancing_and_Edema"
     "99": "Whole_Tumor"
     }
 
