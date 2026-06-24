@@ -20,7 +20,7 @@ GLAM 1.3.2 (Update)
 
 GLAM 1.2.8 (Major Update)
 -------------------------
-* June 2026
+* May 2026
 * **GPU Acceleration:** The entire spatial calculation engine (including GLCM, GLRLM, GLSZM, Topology/Betti numbers, and Lacunarity) has been rewritten in pure CuPy. GLAM now dynamically batches tensor math based on available GPU VRAM, delivering >10x processing speeds.
 * **Thermodynamic Edge-Effect Corrections:** Resolved a KD-Tree truncation limitation in the Radial Distribution Function (RDF). Integrals for the Second Virial Coefficient (B2), Coordination Number, and Configurational Disorder are now strictly bounded to the first coordination shell and corrected against a randomized baseline, yielding pure, physically accurate topological signals free of finite-volume boundary artifacts.
 * **Terminology Update:** Renamed "Effective Structural Temperature" to "Configurational Disorder Index" to better reflect the biophysical nature of the metric.
