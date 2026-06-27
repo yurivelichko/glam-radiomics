@@ -32,6 +32,14 @@ Soft Matter & Geometric Classes
 * **Topological Betti Numbers**: GPU-accelerated calculation of Connected Components (B0), Tunnels (B1), and Enclosed Voids (B2) using the Euler-Poincaré formula.
 * **Fractal Dimension & Lacunarity**: Optimized 3D Box-Counting and GPU Convolutions for multiscale complexity and structural heterogeneity.
 
+Percolation Theory & Network Connectivity
+-----------------------------------------
+Evaluates the macroscopic connectivity of discrete tissue states to determine if specific microenvironments (e.g., necrosis, hypoxia) form isolated fragments or massive spanning networks.
+
+* **Maximum Cluster Size**: Represents the raw biological burden by measuring the absolute voxel count of the largest contiguous tissue region.
+* **Cluster Number Density**: Measures the degree of spatial fragmentation by normalizing the total number of isolated clusters against the ROI volume.
+* **Percolation Strength**: A scale-invariant, volume-independent surrogate for the percolation threshold. It measures the probability that any given active site belongs to the primary spanning cluster.
+
 Matrix Reduction Features
 -------------------------
 Once a multi-dimensional GLAM matrix is generated, the following statistics are extracted to create the final 1D feature vectors for machine learning:
@@ -61,7 +69,10 @@ Once a multi-dimensional GLAM matrix is generated, the following statistics are 
    * - **Symmetry & Diagonal**
      - Reciprocity and "self-affinity" of gray-level interactions.
      - Frobenius Norm, Mean Absolute Asymmetry.
+   * - **Percolation / Network**
+     - Quantifies the macroscopic connectivity and spatial fragmentation of discrete tissue states.
+     - Percolation Strength, Max Cluster Size, Cluster Number Density.
 
 Integration with config.ini
 ---------------------------
-In your ``config.ini`` file, you can specify which of these features to map directly into 3D NIfTI volumes by adding them to the ``MapFeatures`` list (e.g., ``["ConfigurationalDisorderIndex_Symlog", "NematicOrder_S"]``).
+In your ``config.ini`` file, you can specify which of these features to map directly into 3D NIfTI volumes by adding them to the ``MapFeatures`` list (e.g., ``["ConfigurationalDisorderIndex", "PercolationStrength", "CoordNum"]``).
