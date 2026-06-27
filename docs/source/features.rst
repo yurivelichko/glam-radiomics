@@ -72,6 +72,9 @@ Once a multi-dimensional GLAM matrix is generated, the following statistics are 
    * - **Percolation / Network**
      - Quantifies the macroscopic connectivity and spatial fragmentation of discrete tissue states.
      - Percolation Strength, Max Cluster Size, Cluster Number Density.
+   * - **Granulometry / Pattern Spectrum**
+     - Quantifies the physical thickness distribution of distinct tissue states.
+     - Granulometry Mean, Variance, Entropy, Skewness, Kurtosis.    
 
 Integration with config.ini
 ---------------------------

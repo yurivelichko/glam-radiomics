@@ -179,6 +179,24 @@ Percolation theory evaluates the connectivity of voxel clusters to determine how
 * **Interpretation**: This metric asks, *"Is this specific tissue type organized into one massive, connected network that spans the tumor, or is it shattered into tiny, disconnected islands?"*
 * **Advantage**: By providing both the absolute biological burden (:math:`S_{max}`) and the normalized, scale-invariant network connectivity (:math:`P`), percolation metrics preserve critical volumetric context for clinical staging while enabling mathematically pure, volume-independent texture comparisons across heterogeneous patient cohorts.
 
+Granulometry (Pattern Spectrum)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Granulometry, or morphological sieving, calculates the physical thickness distribution of distinct tissue states. While percolation evaluates network connectivity, granulometry filters the region using spherical structuring elements of increasing radii to extract a Pattern Spectrum :math:`P(r)`. 
+
+* **Granulometry Mean:** Represents the average localized thickness of a gray-level cluster or interface.
+* **Granulometry Variance & Entropy:** Quantifies the structural heterogeneity (e.g., measuring "sponginess" by detecting a highly unpredictable mix of thin offshoots and thick bulk nodes).
+* **Granulometry Skewness & Kurtosis:** Identifies morphological imbalance. A positive skew indicates a cluster dominated by thin, fragmented bridges with only rare, exceptionally thick regions.
+
+.. figure:: /_static/GLAM_GranulometryMean_Ln.png
+   :width: 700px
+   :align: center
+   :alt: Granulometry Mean
+
+   **Figure:** Granulometry Mean matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR).
+   
+* **Interpretation**: This metric asks, *"What is the physical thickness profile of this specific tissue type, and is it built like a solid, uniform mass or a spongy, highly variable structure?"*
+* **Advantage**: While standard size metrics (like GLSZM) measure total cluster volume regardless of shape, granulometry isolates the true physical width and granularity. This perfectly distinguishes between a solid tumor core and a diffuse, spindly network of the exact same volume—a critical distinction in delta radiomics when monitoring tissue breakdown or cavitation during therapy.
+
 Topological Excess Features (Excess Matrices)
 ---------------------------------------------
 

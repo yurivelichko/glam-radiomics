@@ -3,12 +3,14 @@ Release Notes
 
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
-GLAM 1.4.8 (Adding Percolation Metrics)
+GLAM 1.4.9 (Adding Granulometry and Percolation Metrics)
 ---------------------------
 * June 2026
+* **Granulometry (Pattern Spectrum) Metrics:** Introduced morphological sieving to evaluate the physical thickness distribution and structural "sponginess" of tissue states. This perfectly complements existing volume-based metrics (like GLSZM) by isolating true physical width.
+  * *Five New Matrices:* Added extraction for Granulometry Mean, Variance, Skewness, Kurtosis, and Entropy, capturing the complete statistical distribution of local tissue thickness.
 * **Percolation Metrics:** Introduced a new module to quantify the macroscopic connectivity and spatial continuity of discrete tissue states. This addition bridges the gap between local discrete morphology and global tissue architecture (e.g., evaluating whether a specific tissue type forms a massive continuous network or is shattered into isolated fragments).
   * *Three New Matrices:* Added extraction for Maximum Cluster Size (representing raw biological burden), Cluster Number Density (representing spatial fragmentation), and Percolation Strength (a volume-independent, scale-invariant static surrogate for the percolation threshold).
-  * *Robust Mathematical Transforms:* Integrated automatic Log1p transformations for all percolation matrices to safely compress exponential scaling and perfectly handle empty tissue regions (zeros) without throwing mathematical errors.
+  * *Robust Mathematical Transforms:* Integrated automatic SymLog, Ln, and Log1p transformations for all percolation matrices to safely compress exponential scaling and perfectly handle empty tissue regions (zeros) without throwing mathematical errors.
 
 GLAM 1.4.6 (Feature Update)
 ---------------------------

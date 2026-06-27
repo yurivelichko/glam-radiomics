@@ -49,6 +49,7 @@ from .core import (
     calculate_profile_shape_features,
     calculate_geometric_factor,   
     calculate_glam_percolation,
+    calculate_glam_granulometry,
     apply_geometric_correction 
 )
 
@@ -200,7 +201,8 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
         **calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels),
         **calculate_glam_shape_matrices(structured_glam_image, num_levels, spacing),
         **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels),
-        **calculate_glam_percolation(structured_glam_image, num_levels, total_roi_voxels)
+        **calculate_glam_percolation(structured_glam_image, num_levels, total_roi_voxels),
+        **calculate_glam_granulometry(structured_glam_image, num_levels, max_radius=10)
     }
     return glam_features
 
@@ -302,7 +304,12 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "Shape_InterfaceArea":  ("GLAM_Shape_InterfaceArea_", None),
         "MaxClusterSize": ("GLAM_InterfaceMaxClusterSize_", "GLAM_VolumeMaxClusterSize_"),
         "ClusterNumberDensity": ("GLAM_InterfaceClusterNumberDensity_", "GLAM_VolumeClusterNumberDensity_"),
-        "PercolationStrength": ("GLAM_InterfacePercolationStrength_", "GLAM_VolumePercolationStrength_")
+        "PercolationStrength": ("GLAM_InterfacePercolationStrength_", "GLAM_VolumePercolationStrength_"),
+        "GranulometryMean": ("GLAM_InterfaceGranulometryMean_", "GLAM_VolumeGranulometryMean_"),
+        "GranulometryVariance": ("GLAM_InterfaceGranulometryVariance_", "GLAM_VolumeGranulometryVariance_"),
+        "GranulometrySkewness": ("GLAM_InterfaceGranulometrySkewness_", "GLAM_VolumeGranulometrySkewness_"),
+        "GranulometryKurtosis": ("GLAM_InterfaceGranulometryKurtosis_", "GLAM_VolumeGranulometryKurtosis_"),
+        "GranulometryEntropy": ("GLAM_InterfaceGranulometryEntropy_", "GLAM_VolumeGranulometryEntropy_")
     }
 
     comparison_targets = ['Betti0', 'Betti1', 'Betti2', 'Euler']
@@ -349,7 +356,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     # --- Transformations (Symlog & Ln) ---
     symlog_targets = [  'StructuralPressureIndex', 'ConfigurationalDisorderIndex', 'B2', 'PotentialEnergy', 
                         'RDF_Kurtosis', 'RDF_Skewness', 'Euler', 
-                        'Betti0_Excess', 'Betti1_Excess', 'Betti2_Excess', 'Euler_Excess']
+                        'Betti0_Excess', 'Betti1_Excess', 'Betti2_Excess', 'Euler_Excess',
+                        'GranulometrySkewness', 'GranulometryKurtosis']
     
     for name in symlog_targets:
         if name in glam_matrices:
@@ -359,7 +367,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
             else:
                 glam_matrices[f'{name}_Symlog'] = np.full_like(mat, np.nan) if mat is not None else None
 
-    ln_targets = ['Lacunarity', 'RDF_Median', 'RDF_PeakHeight', 'CoordNum', 'RDF_Variance', 'RDF_DispersionRatio']
+    ln_targets = ['Lacunarity', 'RDF_Median', 'RDF_PeakHeight', 'CoordNum', 'RDF_Variance', 'RDF_DispersionRatio',
+                  'GranulometryMean', 'GranulometryVariance']
     for name in ln_targets:
         if name in glam_matrices:
             mat = glam_matrices[name]
@@ -373,7 +382,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
 
     # Apply Log1p (Ln(1+x)) to Betti numbers AND Shape Interactions
     log1p_targets = ['Betti0', 'Betti1', 'Betti2', 'Shape_CentroidDist', 
-                     'Shape_InterfaceArea', 'Wasserstein', 'MaxClusterSize']
+                     'Shape_InterfaceArea', 'Wasserstein', 'MaxClusterSize',
+                     'GranulometryEntropy']
     
     for metric in log1p_targets:
         if metric in glam_matrices:

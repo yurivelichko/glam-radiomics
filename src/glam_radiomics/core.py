@@ -3881,6 +3881,193 @@ def _calculate_glam_percolation_cpu(image_3d, num_levels, total_roi_voxels):
 
     return percolation_features
 
+
+def calculate_glam_granulometry(image_3d, num_levels, max_radius=10):
+    """
+    Calculates Granulometry (Pattern Spectrum) Metrics.
+    Extracts the Mean, Variance, Skewness, Kurtosis, and Entropy of local thickness.
+    GPU Accelerated using morphological openings with spherical structuring elements.
+    """
+    if not HAS_GPU:
+        return _calculate_glam_granulometry_cpu(image_3d, num_levels, max_radius)
+        
+    import cupyx.scipy.ndimage as cupy_ndimage
+    print("  - Starting Granulometry analysis (GPU Accelerated)...")
+    granulometry_features = {}
+    
+    image_gpu = cp.array(image_3d, dtype=cp.int16)
+    masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
+    
+    # Pre-calculate spherical structuring elements to avoid recompiling them inside loops
+    spheres_gpu = []
+    for r in range(1, max_radius + 1):
+        L = 2 * r + 1
+        z, y, x = np.ogrid[:L, :L, :L]
+        sphere_cpu = ((z - r)**2 + (y - r)**2 + (x - r)**2 <= r**2).astype(np.int32)
+        spheres_gpu.append(cp.array(sphere_cpu))
+        
+    def get_granulometry_metrics_gpu(binary_mask_gpu):
+        vol_prev = float(cp.sum(binary_mask_gpu))
+        if vol_prev == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+            
+        spectrum = []
+        for r_idx, footprint in enumerate(spheres_gpu):
+            if vol_prev == 0: break
+            # Morphological Opening: Erosion followed by Dilation
+            opened = cupy_ndimage.binary_opening(binary_mask_gpu, structure=footprint)
+            vol_curr = float(cp.sum(opened))
+            spectrum.append(vol_prev - vol_curr)
+            vol_prev = vol_curr
+            
+        # Catch anything larger than the maximum sieve
+        if vol_prev > 0:
+            spectrum.append(vol_prev)
+            
+        spectrum = np.array(spectrum)
+        total = np.sum(spectrum)
+        if total == 0: return 0.0, 0.0, 0.0, 0.0, 0.0
+        
+        p_r = spectrum / total
+        r_vals = np.arange(1, len(p_r) + 1)
+        
+        # Calculate Moments
+        mean_r = np.sum(r_vals * p_r)
+        var_r = np.sum((r_vals - mean_r)**2 * p_r)
+        std_r = np.sqrt(var_r)
+        
+        if std_r > 1e-6:
+            skew_r = np.sum(((r_vals - mean_r) / std_r)**3 * p_r)
+            kurt_r = np.sum(((r_vals - mean_r) / std_r)**4 * p_r)
+        else:
+            skew_r, kurt_r = 0.0, 0.0
+            
+        entropy_r = -np.sum(p_r[p_r > 0] * np.log2(p_r[p_r > 0]))
+        
+        return float(mean_r), float(var_r), float(skew_r), float(kurt_r), float(entropy_r)
+
+    # 1. Volume Granulometry (Diagonal)
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            mean_r, var_r, skew_r, kurt_r, ent_r = 0.0, 0.0, 0.0, 0.0, 0.0
+        else:
+            mean_r, var_r, skew_r, kurt_r, ent_r = get_granulometry_metrics_gpu(masks_gpu[i])
+            
+        granulometry_features[f'GLAM_VolumeGranulometryMean_{i}'] = mean_r
+        granulometry_features[f'GLAM_VolumeGranulometryVariance_{i}'] = var_r
+        granulometry_features[f'GLAM_VolumeGranulometrySkewness_{i}'] = skew_r
+        granulometry_features[f'GLAM_VolumeGranulometryKurtosis_{i}'] = kurt_r
+        granulometry_features[f'GLAM_VolumeGranulometryEntropy_{i}'] = ent_r
+
+    # 2. Interface Granulometry (Off-Diagonal)
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            for j in range(num_levels):
+                if i != j:
+                    granulometry_features[f'GLAM_InterfaceGranulometryMean_{i}_{j}'] = 0.0
+                    granulometry_features[f'GLAM_InterfaceGranulometryVariance_{i}_{j}'] = 0.0
+                    granulometry_features[f'GLAM_InterfaceGranulometrySkewness_{i}_{j}'] = 0.0
+                    granulometry_features[f'GLAM_InterfaceGranulometryKurtosis_{i}_{j}'] = 0.0
+                    granulometry_features[f'GLAM_InterfaceGranulometryEntropy_{i}_{j}'] = 0.0
+            continue
+            
+        dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+        for j in range(num_levels):
+            if i == j: continue
+            
+            if not cp.any(masks_gpu[j]):
+                mean_r, var_r, skew_r, kurt_r, ent_r = 0.0, 0.0, 0.0, 0.0, 0.0
+            else:
+                interface_gpu = dilated_i_gpu & masks_gpu[j]
+                if not cp.any(interface_gpu):
+                    mean_r, var_r, skew_r, kurt_r, ent_r = 0.0, 0.0, 0.0, 0.0, 0.0
+                else:
+                    mean_r, var_r, skew_r, kurt_r, ent_r = get_granulometry_metrics_gpu(interface_gpu)
+            
+            granulometry_features[f'GLAM_InterfaceGranulometryMean_{i}_{j}'] = mean_r
+            granulometry_features[f'GLAM_InterfaceGranulometryVariance_{i}_{j}'] = var_r
+            granulometry_features[f'GLAM_InterfaceGranulometrySkewness_{i}_{j}'] = skew_r
+            granulometry_features[f'GLAM_InterfaceGranulometryKurtosis_{i}_{j}'] = kurt_r
+            granulometry_features[f'GLAM_InterfaceGranulometryEntropy_{i}_{j}'] = ent_r
+
+    del image_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    
+    return granulometry_features
+
+def _calculate_glam_granulometry_cpu(image_3d, num_levels, max_radius=10):
+    """Fallback CPU function for Granulometry Metrics."""
+    print("  - Starting Granulometry analysis (CPU)...")
+    from scipy import ndimage
+    granulometry_features = {}
+    
+    spheres_cpu = []
+    for r in range(1, max_radius + 1):
+        L = 2 * r + 1
+        z, y, x = np.ogrid[:L, :L, :L]
+        spheres_cpu.append(((z - r)**2 + (y - r)**2 + (x - r)**2 <= r**2).astype(int))
+
+    def get_granulometry_metrics(binary_mask):
+        vol_prev = float(np.sum(binary_mask))
+        if vol_prev == 0: return 0.0, 0.0, 0.0, 0.0, 0.0
+            
+        spectrum = []
+        for footprint in spheres_cpu:
+            if vol_prev == 0: break
+            opened = ndimage.binary_opening(binary_mask, structure=footprint)
+            vol_curr = float(np.sum(opened))
+            spectrum.append(vol_prev - vol_curr)
+            vol_prev = vol_curr
+            
+        if vol_prev > 0: spectrum.append(vol_prev)
+            
+        spectrum = np.array(spectrum)
+        total = np.sum(spectrum)
+        if total == 0: return 0.0, 0.0, 0.0, 0.0, 0.0
+        
+        p_r = spectrum / total
+        r_vals = np.arange(1, len(p_r) + 1)
+        mean_r = np.sum(r_vals * p_r)
+        var_r = np.sum((r_vals - mean_r)**2 * p_r)
+        std_r = np.sqrt(var_r)
+        
+        if std_r > 1e-6:
+            skew_r = np.sum(((r_vals - mean_r) / std_r)**3 * p_r)
+            kurt_r = np.sum(((r_vals - mean_r) / std_r)**4 * p_r)
+        else:
+            skew_r, kurt_r = 0.0, 0.0
+            
+        entropy_r = -np.sum(p_r[p_r > 0] * np.log2(p_r[p_r > 0]))
+        return float(mean_r), float(var_r), float(skew_r), float(kurt_r), float(entropy_r)
+
+    for i in range(num_levels):
+        binary_image = (image_3d == i)
+        mean_r, var_r, skew_r, kurt_r, ent_r = get_granulometry_metrics(binary_image)
+        granulometry_features[f'GLAM_VolumeGranulometryMean_{i}'] = mean_r
+        granulometry_features[f'GLAM_VolumeGranulometryVariance_{i}'] = var_r
+        granulometry_features[f'GLAM_VolumeGranulometrySkewness_{i}'] = skew_r
+        granulometry_features[f'GLAM_VolumeGranulometryKurtosis_{i}'] = kurt_r
+        granulometry_features[f'GLAM_VolumeGranulometryEntropy_{i}'] = ent_r
+
+    for i in range(num_levels):
+        for j in range(num_levels):
+            if i == j: continue
+            mask_i, mask_j = (image_3d == i), (image_3d == j)
+            if not np.any(mask_i) or not np.any(mask_j):
+                mean_r, var_r, skew_r, kurt_r, ent_r = 0.0, 0.0, 0.0, 0.0, 0.0
+            else:
+                interface = ndimage.binary_dilation(mask_i) & mask_j
+                mean_r, var_r, skew_r, kurt_r, ent_r = get_granulometry_metrics(interface)
+            
+            granulometry_features[f'GLAM_InterfaceGranulometryMean_{i}_{j}'] = mean_r
+            granulometry_features[f'GLAM_InterfaceGranulometryVariance_{i}_{j}'] = var_r
+            granulometry_features[f'GLAM_InterfaceGranulometrySkewness_{i}_{j}'] = skew_r
+            granulometry_features[f'GLAM_InterfaceGranulometryKurtosis_{i}_{j}'] = kurt_r
+            granulometry_features[f'GLAM_InterfaceGranulometryEntropy_{i}_{j}'] = ent_r
+
+    return granulometry_features
+
 # def calculate_js_divergence_matrix(rdf_df, num_levels):
 #     """
 #     Calculates the symmetric Jensen-Shannon (JS) Divergence Anisotropy Matrix 
