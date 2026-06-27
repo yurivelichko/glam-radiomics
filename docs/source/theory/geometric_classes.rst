@@ -181,3 +181,38 @@ This category extracts explicit geometric descriptors for distinct tissue cluste
 
 * **Interpretation**: This metric asks, *"What are the tangible physical dimensions, roundness, and contact areas of these specific tissue clumps?"*
 * **Advantage**: It provides highly tangible, classic geometric descriptors that correlate directly with standard visual pathological assessments.
+
+Percolation Metrics
+~~~~~~~~~~~~~~~~~~~
+Percolation theory evaluates the connectivity of voxel clusters to determine how local tissue states connect to form macroscopic, spanning networks. It bridges the gap between local discrete morphology and global tissue architecture by quantifying whether a specific tissue type forms a continuous network or exists as isolated fragments. GLAM quantifies this using three primary matrices:
+
+* **Maximum Cluster Size (** :math:`S_{max}` **)**: The absolute voxel count of the largest connected cluster of a specific gray level. It represents the raw biological burden of the largest continuous region (e.g., the absolute volume of the largest contiguous necrotic core).
+
+.. figure:: /_static/GLAM_MaxClusterSize_Ln.png
+   :width: 700px
+   :align: center
+   :alt: Percolation Strength
+
+   **Figure:** Maximum Cluster Size matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+* **Cluster Number Density (** :math:`n_c` **)**: The total number of isolated clusters normalized by the total ROI volume (:math:`N_{clusters} / V_{ROI}`). It quantifies the degree of macroscopic fragmentation.
+
+.. figure:: /_static/GLAM_ClusterNumberDensity.png
+   :width: 700px
+   :align: center
+   :alt: Percolation Strength
+
+   **Figure:** Cluster Number Density matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+* **Percolation Strength (** :math:`P` **)**: The probability that any active site belongs to the largest cluster, defined as :math:`P = S_{max} / N_{active}`. This provides a volume-independent, static surrogate for the percolation threshold, allowing robust texture comparisons between tumors of vastly different sizes.
+
+.. figure:: /_static/GLAM_PercolationStrength_Ln.png
+   :width: 700px
+   :align: center
+   :alt: Percolation Strength
+
+   **Figure:** Percolation Strength matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+* **Interpretation**: This metric asks, *"Is this specific tissue type organized into one massive, connected network that spans the tumor, or is it shattered into tiny, disconnected islands?"*
+* **Advantage**: By providing both the absolute biological burden (:math:`S_{max}`) and the normalized, scale-invariant network connectivity (:math:`P`), percolation metrics preserve critical volumetric context for clinical staging while enabling mathematically pure, volume-independent texture comparisons across heterogeneous patient cohorts.
+

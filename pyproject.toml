@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glam-radiomics"  
-version = "1.4.6"
+version = "1.4.8"
 authors = [
   { name = "Yuri Velichko", email = "y-velichko@northwestern.edu" },
 ]

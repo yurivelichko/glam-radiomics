@@ -3742,6 +3742,145 @@ def _calculate_glam_shape_matrices_cpu(structured_image, num_levels, spacing):
     return feats
 
 
+def calculate_glam_percolation(image_3d, num_levels, total_roi_voxels):
+    """
+    Calculates Percolation Metrics for the GLAM Soft Matter geometric classes.
+    GPU Accelerated using CuPy connected component labeling.
+    """
+    if not HAS_GPU: 
+        return _calculate_glam_percolation_cpu(image_3d, num_levels, total_roi_voxels)
+        
+    import cupyx.scipy.ndimage as cupy_ndimage
+    print("  - Starting Percolation analysis (GPU Accelerated)...")
+    percolation_features = {}
+    
+    image_gpu = cp.array(image_3d, dtype=cp.int16)
+    masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
+    structure_3d = cp.ones((3, 3, 3), dtype=cp.int32) # 26-connectivity for 3D clusters
+    
+    def get_percolation_metrics_gpu(binary_mask_gpu):
+        total_mask_voxels = float(cp.sum(binary_mask_gpu))
+        if total_mask_voxels == 0:
+            return 0.0, 0.0, 0.0
+            
+        labeled_gpu, num_features = cupy_ndimage.label(binary_mask_gpu, structure=structure_3d)
+        if num_features == 0:
+            return 0.0, 0.0, 0.0
+            
+        # Bincount to get sizes of all clusters (index 0 is the background, skip it)
+        cluster_sizes = cp.bincount(labeled_gpu.ravel())[1:]
+        if cluster_sizes.size == 0: 
+            return 0.0, 0.0, 0.0
+            
+        max_cluster_size = float(cp.max(cluster_sizes))
+        
+        # 1. Cluster Number Density (n_c = N_clusters / V_ROI)
+        cluster_density = float(num_features) / total_roi_voxels if total_roi_voxels > 0 else 0.0
+        
+        # 2. Percolation Strength (P = S_max / N_active) - static threshold surrogate
+        percolation_strength = max_cluster_size / total_mask_voxels
+        
+        return max_cluster_size, cluster_density, percolation_strength
+
+    # 1. Volume Percolation (Diagonal)
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            s_max, n_c, p_strength = 0.0, 0.0, 0.0
+        else:
+            s_max, n_c, p_strength = get_percolation_metrics_gpu(masks_gpu[i])
+            
+        percolation_features[f'GLAM_VolumeMaxClusterSize_{i}'] = s_max
+        percolation_features[f'GLAM_VolumeClusterNumberDensity_{i}'] = n_c
+        percolation_features[f'GLAM_VolumePercolationStrength_{i}'] = p_strength
+
+    # 2. Interface Percolation (Off-Diagonal)
+    for i in range(num_levels):
+        if not cp.any(masks_gpu[i]):
+            for j in range(num_levels):
+                if i != j:
+                    percolation_features[f'GLAM_InterfaceMaxClusterSize_{i}_{j}'] = 0.0
+                    percolation_features[f'GLAM_InterfaceClusterNumberDensity_{i}_{j}'] = 0.0
+                    percolation_features[f'GLAM_InterfacePercolationStrength_{i}_{j}'] = 0.0
+            continue
+            
+        dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
+        
+        for j in range(num_levels):
+            if i == j: continue
+            
+            if not cp.any(masks_gpu[j]):
+                s_max, n_c, p_strength = 0.0, 0.0, 0.0
+            else:
+                interface_gpu = dilated_i_gpu & masks_gpu[j]
+                if not cp.any(interface_gpu):
+                    s_max, n_c, p_strength = 0.0, 0.0, 0.0
+                else:
+                    s_max, n_c, p_strength = get_percolation_metrics_gpu(interface_gpu)
+            
+            percolation_features[f'GLAM_InterfaceMaxClusterSize_{i}_{j}'] = s_max
+            percolation_features[f'GLAM_InterfaceClusterNumberDensity_{i}_{j}'] = n_c
+            percolation_features[f'GLAM_InterfacePercolationStrength_{i}_{j}'] = p_strength
+
+    # Cleanup
+    del image_gpu
+    del masks_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    
+    return percolation_features
+
+def _calculate_glam_percolation_cpu(image_3d, num_levels, total_roi_voxels):
+    """Fallback CPU function for Percolation Metrics."""
+    print("  - Starting Percolation analysis (CPU)...")
+    from scipy import ndimage
+    
+    percolation_features = {}
+    structure_3d = np.ones((3, 3, 3), dtype=int)
+    
+    def get_percolation_metrics(binary_mask):
+        total_mask_voxels = float(np.sum(binary_mask))
+        if total_mask_voxels == 0:
+            return 0.0, 0.0, 0.0
+            
+        labeled, num_features = ndimage.label(binary_mask, structure=structure_3d)
+        if num_features == 0:
+            return 0.0, 0.0, 0.0
+            
+        cluster_sizes = np.bincount(labeled.ravel())[1:]
+        if cluster_sizes.size == 0: 
+            return 0.0, 0.0, 0.0
+            
+        max_cluster_size = float(np.max(cluster_sizes))
+        cluster_density = float(num_features) / total_roi_voxels if total_roi_voxels > 0 else 0.0
+        percolation_strength = max_cluster_size / total_mask_voxels
+        
+        return max_cluster_size, cluster_density, percolation_strength
+
+    for i in range(num_levels):
+        binary_image = (image_3d == i)
+        s_max, n_c, p_strength = get_percolation_metrics(binary_image)
+        percolation_features[f'GLAM_VolumeMaxClusterSize_{i}'] = s_max
+        percolation_features[f'GLAM_VolumeClusterNumberDensity_{i}'] = n_c
+        percolation_features[f'GLAM_VolumePercolationStrength_{i}'] = p_strength
+
+    for i in range(num_levels):
+        for j in range(num_levels):
+            if i == j: continue
+            
+            mask_i = (image_3d == i)
+            mask_j = (image_3d == j)
+            
+            if not np.any(mask_i) or not np.any(mask_j):
+                s_max, n_c, p_strength = 0.0, 0.0, 0.0
+            else:
+                interface = ndimage.binary_dilation(mask_i) & mask_j
+                s_max, n_c, p_strength = get_percolation_metrics(interface)
+                
+            percolation_features[f'GLAM_InterfaceMaxClusterSize_{i}_{j}'] = s_max
+            percolation_features[f'GLAM_InterfaceClusterNumberDensity_{i}_{j}'] = n_c
+            percolation_features[f'GLAM_InterfacePercolationStrength_{i}_{j}'] = p_strength
+
+    return percolation_features
+
 # def calculate_js_divergence_matrix(rdf_df, num_levels):
 #     """
 #     Calculates the symmetric Jensen-Shannon (JS) Divergence Anisotropy Matrix 

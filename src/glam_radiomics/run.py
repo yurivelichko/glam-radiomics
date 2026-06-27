@@ -48,6 +48,7 @@ from .core import (
     calculate_cluster_features,
     calculate_profile_shape_features,
     calculate_geometric_factor,   
+    calculate_glam_percolation,
     apply_geometric_correction 
 )
 
@@ -198,7 +199,8 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
         **calculate_glam_structural_pressure_index(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
         **calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels),
         **calculate_glam_shape_matrices(structured_glam_image, num_levels, spacing),
-        **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels)
+        **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels),
+        **calculate_glam_percolation(structured_glam_image, num_levels, total_roi_voxels)
     }
     return glam_features
 
@@ -297,7 +299,10 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "Shape_RadialSkewness": (None, "GLAM_Shape_RadialSkewness_"),
         "Shape_RadialKurtosis": (None, "GLAM_Shape_RadialKurtosis_"),
         "Shape_CentroidDist":   ("GLAM_Shape_CentroidDist_", None),
-        "Shape_InterfaceArea":  ("GLAM_Shape_InterfaceArea_", None)
+        "Shape_InterfaceArea":  ("GLAM_Shape_InterfaceArea_", None),
+        "MaxClusterSize": ("GLAM_InterfaceMaxClusterSize_", "GLAM_VolumeMaxClusterSize_"),
+        "ClusterNumberDensity": ("GLAM_InterfaceClusterNumberDensity_", "GLAM_VolumeClusterNumberDensity_"),
+        "PercolationStrength": ("GLAM_InterfacePercolationStrength_", "GLAM_VolumePercolationStrength_")
     }
 
     comparison_targets = ['Betti0', 'Betti1', 'Betti2', 'Euler']
@@ -367,7 +372,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
                 glam_matrices[f'{name}_Ln'] = np.full_like(mat, np.nan) if mat is not None else None
 
     # Apply Log1p (Ln(1+x)) to Betti numbers AND Shape Interactions
-    log1p_targets = ['Betti0', 'Betti1', 'Betti2', 'Shape_CentroidDist', 'Shape_InterfaceArea', 'Wasserstein']
+    log1p_targets = ['Betti0', 'Betti1', 'Betti2', 'Shape_CentroidDist', 
+                     'Shape_InterfaceArea', 'Wasserstein', 'MaxClusterSize']
     
     for metric in log1p_targets:
         if metric in glam_matrices:
@@ -398,7 +404,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         'FractalDimension', 'Lacunarity_Ln', 'MultifractalWidth', 'MultifractalAlpha0', 'MultifractalD2',
         'InverseCorrelationLength', 'Anisotropy',  # <--- UPDATED HERE
         'PotentialEnergy_Symlog', 'CoordNum_Ln', 'ConfigurationalDisorderIndex_Symlog', 'StructuralPressureIndex_Symlog',   
-        'Shape_CentroidDist_Ln', 'Shape_InterfaceArea_Ln'
+        'Shape_CentroidDist_Ln', 'Shape_InterfaceArea_Ln', 'MaxClusterSize_Ln'
     ]
     
     for name in shape_targets:
