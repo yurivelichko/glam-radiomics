@@ -25,12 +25,12 @@ RDF Shape Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 To capture the extensive information embedded in the full RDF curves without incurring the "curse of dimensionality," we transform key statistical properties of each :math:`g_{\alpha\beta}(r)` curve into a set of primary GLAM matrices. For every gray-level pair, we compute the Peak Position, Dispersion Ratio, Peak Height, Median, Variance, Skewness, and Kurtosis.
 
-.. figure:: /_static/GLAM_LogRDF_Median.png
+.. figure:: /_static/GLAM_LogRDF_Kurtosis.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
 
-   **Figure:** RDF Median matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+   **Figure:** RDF Kurtosis matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
 .. figure:: /_static/GLAM_RDF_PeakPosition.png
    :width: 700px
