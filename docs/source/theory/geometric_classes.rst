@@ -169,7 +169,7 @@ Percolation theory evaluates the connectivity of voxel clusters to determine how
 
 * **Percolation Strength (** :math:`P` **)**: The probability that any active site belongs to the largest cluster, defined as :math:`P = S_{max} / N_{active}`. This provides a volume-independent, static surrogate for the percolation threshold, allowing robust texture comparisons between tumors of vastly different sizes.
 
-.. figure:: /_static/GLAM_PercolationStrength_Ln.png
+.. figure:: /_static/GLAM_PercolationStrength.png
    :width: 700px
    :align: center
    :alt: Percolation Strength
