@@ -47,10 +47,10 @@ from .core import (
     calculate_glam_wasserstein_distance,
     calculate_cluster_features,
     calculate_profile_shape_features,
-    calculate_geometric_factor,   
     calculate_glam_percolation,
     calculate_glam_granulometry,
-    apply_geometric_correction 
+    calculate_glam_frustration_index,
+    calculate_glam_local_packing_fraction
 )
 
 from .utils import (
@@ -185,6 +185,10 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
     """
     anisotropy_cutoff_radius = get_config('AnisotropyCutoffRadius')
     
+    spi_feats = calculate_glam_structural_pressure_index(rdf_structured_df, num_levels, level_counts, total_roi_voxels)
+    cdi_feats = calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels)
+    frustration_feats = calculate_glam_frustration_index(spi_feats, cdi_feats, num_levels)
+
     print("  - Starting Primary GLAM Feature calculation...")
     glam_features = {
         **calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels),
@@ -197,12 +201,15 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
         **calculate_glam_lacunarity(structured_glam_image, num_levels),
         **calculate_glam_topology(structured_glam_image, num_levels),
         **calculate_glam_potential_energy(rdf_structured_df, num_levels),
-        **calculate_glam_structural_pressure_index(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
-        **calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels),
+        **spi_feats,
+        **cdi_feats,
+        **frustration_feats,
+        **calculate_glam_local_packing_fraction(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
         **calculate_glam_shape_matrices(structured_glam_image, num_levels, spacing),
         **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels),
         **calculate_glam_percolation(structured_glam_image, num_levels, total_roi_voxels),
         **calculate_glam_granulometry(structured_glam_image, num_levels, max_radius=10)
+        
     }
     return glam_features
 
@@ -284,6 +291,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "PotentialEnergy": ("GLAM_PotentialEnergy_", None),
         "StructuralPressureIndex": ("GLAM_StructuralPressureIndex_", None),
         "ConfigurationalDisorderIndex": ("GLAM_ConfigurationalDisorderIndex_", None),
+        "FrustrationIndex": ("GLAM_FrustrationIndex_", None), 
+        "LocalPackingFraction": ("GLAM_LocalPackingFraction_", None),
         "Wasserstein": ("GLAM_Wasserstein_", None),
         "FractalDimension": ("GLAM_InterfaceFD_", "GLAM_VolumeFD_"),
         "MultifractalWidth": ("GLAM_InterfaceMultifractal_Width_", "GLAM_VolumeMultifractal_Width_"),
@@ -309,7 +318,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "GranulometryVariance": ("GLAM_InterfaceGranulometryVariance_", "GLAM_VolumeGranulometryVariance_"),
         "GranulometrySkewness": ("GLAM_InterfaceGranulometrySkewness_", "GLAM_VolumeGranulometrySkewness_"),
         "GranulometryKurtosis": ("GLAM_InterfaceGranulometryKurtosis_", "GLAM_VolumeGranulometryKurtosis_"),
-        "GranulometryEntropy": ("GLAM_InterfaceGranulometryEntropy_", "GLAM_VolumeGranulometryEntropy_")
+        "GranulometryEntropy": ("GLAM_InterfaceGranulometryEntropy_", "GLAM_VolumeGranulometryEntropy_"),
     }
 
     comparison_targets = ['Betti0', 'Betti1', 'Betti2', 'Euler']
@@ -767,18 +776,18 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
         prep_data['total_roi_voxels']
     )
     
-    geom_factor = calculate_geometric_factor(mask_array, max_rdf_radius, get_config('RdfSamplePoints'))
-    rdf_structured_corr = apply_geometric_correction(rdf_structured_df, geom_factor)
-    rdf_random_corr = apply_geometric_correction(rdf_random_df, geom_factor)
+    # geom_factor = calculate_geometric_factor(mask_array, max_rdf_radius, get_config('RdfSamplePoints'))
+    # rdf_structured_corr = apply_geometric_correction(rdf_structured_df, geom_factor)
+    # rdf_random_corr = apply_geometric_correction(rdf_random_df, geom_factor)
 
-    save_matrix(rdf_structured_corr, prefix, output_dir, "GLAM_RDF_structured_Corrected", columns=rdf_structured_corr.columns)
+    save_matrix(rdf_structured_df, prefix, output_dir, "GLAM_RDF_structured_Corrected", columns=rdf_structured_df.columns)
 
     # --- GET SPACING ---
     spacing = image_sitk.GetSpacing() 
     # -------------------
 
     primary_glam_features = calculate_primary_glam_features(
-        rdf_structured_corr, rdf_random_corr, prep_data['structured_glam_image'],
+        rdf_structured_df, rdf_random_df, prep_data['structured_glam_image'],
         num_gray_levels, prep_data['level_counts'], prep_data['total_roi_voxels'],
         spacing # <--- PASS IT
     )
@@ -794,7 +803,7 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
 
     glam_matrices, glam_meta_features = build_and_analyze_glam_matrices(
         primary_glam_features, scalar_glam_features, prep_data['total_roi_voxels'],
-        num_gray_levels, prefix, output_dir, rdf_structured_corr
+        num_gray_levels, prefix, output_dir, rdf_structured_df
     )
     
     # Combine everything

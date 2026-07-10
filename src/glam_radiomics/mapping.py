@@ -16,9 +16,7 @@ from .core import (
     calculate_configurational_disorder_index,
     calculate_glam_compressibility,
     calculate_rdf_shape_matrices,
-    calculate_glam_fractal_dimension,
-    calculate_geometric_factor,   
-    apply_geometric_correction
+    calculate_glam_fractal_dimension
 )
 from .utils import reformat_dict_to_matrix
 

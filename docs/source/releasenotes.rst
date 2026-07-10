@@ -3,6 +3,17 @@ Release Notes
 
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
+GLAM 1.5.0 (Core Engine Update)
+---------------------------
+* July 2026
+* **In-Situ Intersection-Volume Normalization:** Fundamentally overhauled the boundary handling within the Radial Distribution Function (RDF) engine to solve finite-size edge effects.
+  * *The Physics:* Previously, the algorithm utilized an ideal spherical volume denominator combined with a global geometric correction curve. For highly irregular, lobulated, or infiltrative tumors (such as glioblastomas and sarcomas), this global approximation under-corrected sharp convexities, mathematically mimicking an artificial "unjammed" or fluid state at the tumor boundary.
+  * *The Fix:* Implemented dynamic, voxel-wise 3D convolutions to compute the precise physical intersection volume for every radial shell. This strictly confines the mathematics to the anatomical shape of the lesion, isolating true biological unjamming at the invasive margin from mathematical mask-edge artifacts.
+* **Mechanical Phase & Jamming Transitions:** Introduced a new class of descriptors to quantify the physical phase state of the tissue architecture, identifying regions of structural arrest versus active fluidization (unjamming). 
+  * *Two New Matrices:* Added extraction for the **Local Packing Fraction** (dimensionless spatial saturation) and the **Structural Frustration Index** (the ratio of structural stress to configurational disorder).
+* **Refined Thermodynamic Metrics:** Due to the new boundary precision, the **Structural Pressure Index (SPI)** and **Configurational Disorder Index (CDI)** are now perfectly mathematically stable right up to the outermost voxel of the Volume of Interest (VOI).
+* **Deprecated Legacy Correction:** Removed the now-obsolete ``calculate_geometric_factor`` and ``apply_geometric_correction`` modules. The primary ``calculate_rdf_3d`` engine now natively outputs the fully geometry-independent thermodynamic signature. 
+
 GLAM 1.4.9 (Adding Granulometry and Percolation Metrics)
 ---------------------------
 * June 2026

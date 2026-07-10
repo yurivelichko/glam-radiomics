@@ -24,8 +24,7 @@ try:
 except ImportError:
     HAS_GPU = False
 
-# =============================================================================
-
+#------------------------------------------------------------------------------
 def calculate_glcm_3d(image, num_gl):
     """Calculates the symmetric 3D GLCM (offset [0,0,1]). GPU Accelerated."""
     if not HAS_GPU: return _calculate_glcm_3d_cpu(image, num_gl)
@@ -682,13 +681,19 @@ def calculate_shape_features_3d(mask_sitk, prefix):
 # === CORE GLAM CALCULATION FUNCTIONS ===
 # =============================================================================
 
+def get_shell_kernel(r):
+    """Creates a 3D boolean kernel for a radial shell."""
+    size = int(np.ceil(r))
+    z, y, x = np.ogrid[-size:size+1, -size:size+1, -size:size+1]
+    distances = np.sqrt(z**2 + y**2 + x**2)
+    return (np.floor(distances) == r).astype(float)
+
 def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts, 
                      total_roi_voxels, num_randomisations, rdf_sample_points, 
                      sample_mask=None): 
     """
-    Calculates the Radial Distribution Function (RDF) for a 3D image.
-    Automatically detects CUDA availability and scales memory batching.
-    Uses pure cuBLAS matrix math, avoiding RAPIDS cuVS dependencies on Windows.
+    Calculates the boundary-corrected Radial Distribution Function (RDF) for a 3D image.
+    Uses pure cuBLAS matrix math with dynamic intersection-volume normalization.
     """
     
     # 1. Hardware Check & CPU Fallback
@@ -697,34 +702,39 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         return _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
                                      total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask)
 
-    # Query GPU Memory to determine safe batch size
     dev = cp.cuda.Device(0)
     free_mem, _ = dev.mem_info
-    
-    # We leave a 50% safety buffer for VRAM overhead
     safe_vram_bytes = free_mem * 0.5 
 
-    # 2. Define ALL potential neighbors (The "System")
-    coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
+    # 2. Precompute Dynamic Intersection Volumes (CPU side to save VRAM)
+    v_intersect_maps = {}
+    if sample_mask is not None:
+        mask_float = (sample_mask > 0).astype(float)
+        for r in range(1, max_radius + 1):
+            kernel = get_shell_kernel(r)
+            v_intersect_maps[r] = ndimage.convolve(mask_float, kernel, mode='constant', cval=0.0)
+    else:
+        # Ideal volumes if no mask is provided
+        v_ideal = {r: (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3) for r in range(1, max_radius + 1)}
+
+    # 3. Define ALL potential neighbors (The "System") restricted to mask
+    coords = []
+    for i in range(num_levels):
+        if sample_mask is not None:
+            mask_i = (image_3d == i) & (sample_mask > 0)
+        else:
+            mask_i = (image_3d == i)
+        coords.append(np.argwhere(mask_i))
+        # Update level counts to reflect ONLY masked voxels
+        level_counts[i] = len(coords[-1]) 
     
-    # Move neighbor coordinates to GPU VRAM once
     coords_gpu = [cp.array(c, dtype=cp.float32) if len(c) > 0 else None for c in coords]
-    
     rdf_data = defaultdict(lambda: defaultdict(float))
     
     for alpha in range(num_levels):
         if level_counts[alpha] == 0: continue
         
-        # Define Reference Points (The "Window")
-        coords_alpha_all = coords[alpha]
-        
-        if sample_mask is not None:
-            if len(coords_alpha_all) == 0: continue
-            is_in_mask = sample_mask[coords_alpha_all[:,0], coords_alpha_all[:,1], coords_alpha_all[:,2]] > 0
-            coords_alpha = coords_alpha_all[is_in_mask]
-        else:
-            coords_alpha = coords_alpha_all
-
+        coords_alpha = coords[alpha]
         if len(coords_alpha) == 0: continue
 
         num_ref_points = min(len(coords_alpha), rdf_sample_points)
@@ -732,69 +742,73 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         
         ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
         ref_points = coords_alpha[ref_indices]
-        
-        # Move active reference points to GPU
         ref_points_gpu = cp.array(ref_points, dtype=cp.float32)
+
+        # Pre-extract exact shell volumes for these specific reference points
+        if sample_mask is not None:
+            v_shell_alpha = {r: v_intersect_maps[r][ref_points[:,0], ref_points[:,1], ref_points[:,2]] for r in range(1, max_radius + 1)}
+            v_shell_gpu = {r: cp.array(v_shell_alpha[r], dtype=cp.float32) for r in range(1, max_radius + 1)}
 
         for beta in range(num_levels):
             if level_counts[beta] == 0: continue
             target_points_gpu = coords_gpu[beta]
             if target_points_gpu is None: continue
 
-            # --- DYNAMIC BATCHING ---
             num_targets = target_points_gpu.shape[0]
-            # dist_sq and dists arrays will take batch_size * num_targets * 4 bytes each
             bytes_per_ref = num_targets * 8
             
-            # Calculate how many reference points we can process simultaneously
             batch_size = int(safe_vram_bytes // bytes_per_ref)
-            batch_size = max(1, min(batch_size, num_ref_points)) # Clamp between 1 and total points
+            batch_size = max(1, min(batch_size, num_ref_points))
             
-            pair_counts = cp.zeros(max_radius + 1, dtype=cp.int32)
+            # Track accumulated density and valid points per shell
+            accumulated_density = cp.zeros(max_radius + 1, dtype=cp.float32)
+            valid_point_counts = cp.zeros(max_radius + 1, dtype=cp.float32)
 
-            # Pre-calculate target squared norms for fast Euclidean distance
             B_sq = cp.sum(target_points_gpu**2, axis=1)
 
             for i in range(0, num_ref_points, batch_size):
                 batch_refs = ref_points_gpu[i : i + batch_size]
                 
-                # --- PURE CUPY EUCLIDEAN DISTANCE (cuBLAS) ---
-                # Mathematical expansion: ||A - B||^2 = ||A||^2 + ||B||^2 - 2(A . B)
                 A_sq = cp.sum(batch_refs**2, axis=1, keepdims=True)
                 AB = cp.matmul(batch_refs, target_points_gpu.T)
                 
                 dist_sq = A_sq + B_sq - 2.0 * AB
-                dists = cp.sqrt(cp.maximum(dist_sq, 0.0)) # maximum() prevents float precision negatives
+                dists = cp.sqrt(cp.maximum(dist_sq, 0.0)) 
                 
-                # Filter out of bounds and self-interactions
                 if alpha == beta:
                     valid_mask = (dists > 1e-6) & (dists <= max_radius + 0.99)
                 else:
                     valid_mask = (dists <= max_radius + 0.99)
                 
-                valid_dists = dists[valid_mask]
+                bins = cp.floor(dists).astype(cp.int32)
                 
-                # Bin the distances into spherical shells
-                if valid_dists.size > 0:
-                    bins = cp.floor(valid_dists).astype(cp.int32)
-                    batch_counts = cp.bincount(bins, minlength=max_radius + 1)
-                    pair_counts += batch_counts[:max_radius + 1]
+                # Bin row-by-row to maintain per-reference point counts
+                for r in range(1, max_radius + 1):
+                    # sum over targets for each reference point
+                    counts_r = cp.sum((bins == r) & valid_mask, axis=1) 
+                    
+                    if sample_mask is not None:
+                        v_batch = v_shell_gpu[r][i : i + batch_size]
+                        valid_v = v_batch > 0
+                        
+                        if cp.any(valid_v):
+                            local_densities = counts_r[valid_v] / v_batch[valid_v]
+                            accumulated_density[r] += cp.sum(local_densities)
+                            valid_point_counts[r] += cp.sum(valid_v)
+                    else:
+                        accumulated_density[r] += cp.sum(counts_r) / v_ideal[r]
+                        valid_point_counts[r] += counts_r.shape[0]
             
-            # Move histogram counts back to CPU for final scaling
-            pair_counts_cpu = pair_counts.get()
+            acc_den_cpu = accumulated_density.get()
+            vpc_cpu = valid_point_counts.get()
             
             rho_beta = level_counts[beta] / total_roi_voxels
             if rho_beta == 0: continue
             
             for r in range(1, max_radius + 1):
-                count = pair_counts_cpu[r]
-                if count > 0:
-                    dn = count / num_ref_points
-                    shell_volume = (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3)
-                    if shell_volume > 0:
-                        rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
+                if vpc_cpu[r] > 0:
+                    rdf_data[(alpha, beta)][r] = (acc_den_cpu[r] / vpc_cpu[r]) / rho_beta
 
-        # Clean up GPU memory
         cp.get_default_memory_pool().free_all_blocks()
 
     df_data = []
@@ -802,30 +816,39 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         row = {'r': r}
         for alpha in range(num_levels):
             for beta in range(num_levels):
-                key = f'g_{alpha}_{beta}'
-                row[key] = rdf_data.get((alpha, beta), {}).get(r, 0)
+                row[f'g_{alpha}_{beta}'] = rdf_data.get((alpha, beta), {}).get(r, 0)
         df_data.append(row)
 
     return pd.DataFrame(df_data)
 
 def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask=None):
     """
-    Fallback CPU function using scipy cKDTree.
+    Fallback CPU function using scipy cKDTree and boundary correction.
     """
-    coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
+    v_intersect_maps = {}
+    if sample_mask is not None:
+        mask_float = (sample_mask > 0).astype(float)
+        for r in range(1, max_radius + 1):
+            kernel = get_shell_kernel(r)
+            v_intersect_maps[r] = ndimage.convolve(mask_float, kernel, mode='constant', cval=0.0)
+    else:
+        v_ideal = {r: (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3) for r in range(1, max_radius + 1)}
+
+    coords = []
+    for i in range(num_levels):
+        if sample_mask is not None:
+            mask_i = (image_3d == i) & (sample_mask > 0)
+        else:
+            mask_i = (image_3d == i)
+        coords.append(np.argwhere(mask_i))
+        level_counts[i] = len(coords[-1])
+
     rdf_data = defaultdict(lambda: defaultdict(float))
 
     for alpha in range(num_levels):
         if level_counts[alpha] == 0: continue
         
-        coords_alpha_all = coords[alpha]
-        if sample_mask is not None:
-            if len(coords_alpha_all) == 0: continue
-            is_in_mask = sample_mask[coords_alpha_all[:,0], coords_alpha_all[:,1], coords_alpha_all[:,2]] > 0
-            coords_alpha = coords_alpha_all[is_in_mask]
-        else:
-            coords_alpha = coords_alpha_all
-
+        coords_alpha = coords[alpha]
         if len(coords_alpha) == 0: continue
 
         num_ref_points = min(len(coords_alpha), rdf_sample_points)
@@ -834,214 +857,60 @@ def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_
         ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
         ref_points = coords_alpha[ref_indices]
 
+        if sample_mask is not None:
+            v_shell_alpha = {r: v_intersect_maps[r][ref_points[:,0], ref_points[:,1], ref_points[:,2]] for r in range(1, max_radius + 1)}
+
         for beta in range(num_levels):
             if level_counts[beta] == 0: continue
             
             target_points = coords[beta]
             tree = cKDTree(target_points)
             
-            # Using cKDTree to find neighbors within max_radius
             neighbors = tree.query_ball_point(ref_points, max_radius + 0.99)
             
-            pair_counts = np.zeros(max_radius + 1)
+            accumulated_density = np.zeros(max_radius + 1)
+            valid_point_counts = np.zeros(max_radius + 1)
+            
             for i, n_indices in enumerate(neighbors):
+                counts_i = np.zeros(max_radius + 1)
+                
                 for j in n_indices:
-                    # Skip self-interaction
                     if alpha == beta and np.array_equal(ref_points[i], target_points[j]):
                         continue
                         
                     dist = np.linalg.norm(ref_points[i] - target_points[j])
                     if dist <= max_radius + 0.99:
                         r_bin = int(np.floor(dist))
-                        if r_bin <= max_radius:
-                            pair_counts[r_bin] += 1
+                        if 1 <= r_bin <= max_radius:
+                            counts_i[r_bin] += 1
+                
+                for r in range(1, max_radius + 1):
+                    if sample_mask is not None:
+                        v = v_shell_alpha[r][i]
+                        if v > 0:
+                            accumulated_density[r] += counts_i[r] / v
+                            valid_point_counts[r] += 1
+                    else:
+                        accumulated_density[r] += counts_i[r] / v_ideal[r]
+                        valid_point_counts[r] += 1
             
             rho_beta = level_counts[beta] / total_roi_voxels
             if rho_beta == 0: continue
             
             for r in range(1, max_radius + 1):
-                count = pair_counts[r]
-                if count > 0:
-                    dn = count / num_ref_points
-                    shell_volume = (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3)
-                    if shell_volume > 0:
-                        rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
+                if valid_point_counts[r] > 0:
+                    rdf_data[(alpha, beta)][r] = (accumulated_density[r] / valid_point_counts[r]) / rho_beta
 
     df_data = []
     for r in range(1, max_radius + 1):
         row = {'r': r}
         for alpha in range(num_levels):
             for beta in range(num_levels):
-                key = f'g_{alpha}_{beta}'
-                row[key] = rdf_data.get((alpha, beta), {}).get(r, 0)
+                row[f'g_{alpha}_{beta}'] = rdf_data.get((alpha, beta), {}).get(r, 0)
         df_data.append(row)
 
     return pd.DataFrame(df_data)
 
-# def calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
-#                      total_roi_voxels, num_randomisations, rdf_sample_points, 
-#                      sample_mask=None): 
-#     """
-#     Calculates the Radial Distribution Function (RDF) for a 3D image.
-    
-#     Args:
-#         image_3d: The input image (quantized) containing the "System" (neighbors).
-#         sample_mask: (Optional) A binary mask of the same shape as image_3d. 
-#                      If provided, Reference Points are chosen ONLY from voxels 
-#                      where sample_mask == 1. Neighbors are still chosen from 
-#                      the entire image_3d.
-#     """
-    
-#     from scipy.spatial import cKDTree
-
-#     # Remove the global check: if NUM_RANDOMISATIONS <= 1:
-#     if num_randomisations == 0:
-#          pass 
-#     elif num_randomisations == 1:
-#          pass 
-    
-#     # 1. Define ALL potential neighbors (The "System")
-#     # These include pixels in the Halo/Padding
-#     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
-#     coord_trees = [cKDTree(c) if len(c) > 0 else None for c in coords]
-#     rdf_data = defaultdict(lambda: defaultdict(float))
-    
-#     for alpha in range(num_levels):
-#         if level_counts[alpha] == 0: continue
-        
-#         # 2. Define Reference Points (The "Window")
-#         coords_alpha_all = coords[alpha]
-        
-#         if sample_mask is not None:
-#             # Filter: Keep points where sample_mask is True
-#             # This restricts the measurement "center" to the strict ROI/Window
-#             if len(coords_alpha_all) == 0: continue
-            
-#             # Efficient boolean indexing
-#             is_in_mask = sample_mask[coords_alpha_all[:,0], coords_alpha_all[:,1], coords_alpha_all[:,2]] > 0
-#             coords_alpha = coords_alpha_all[is_in_mask]
-#         else:
-#             # Default behavior: Measure everywhere
-#             coords_alpha = coords_alpha_all
-
-#         # Check if we have enough points in the Window to calculate stats
-#         if len(coords_alpha) == 0: continue
-
-#         # Downsample if needed (Sample ONLY from the valid window points)
-#         num_ref_points = min(len(coords_alpha), rdf_sample_points)
-#         if num_ref_points == 0: continue
-        
-#         ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
-#         ref_points = coords_alpha[ref_indices]
-
-#         for beta in range(num_levels):
-#             # Beta points (neighbors) come from the FULL SYSTEM (coords), not the mask
-#             if level_counts[beta] == 0: continue
-#             tree_beta = coord_trees[beta]
-#             if tree_beta is None: continue
-
-#             neighbors_at_max_radius = tree_beta.query_ball_point(ref_points, max_radius)
-#             pair_counts = defaultdict(int)
-
-#             for i in range(num_ref_points):
-#                 if alpha == beta:
-#                     # Self-interaction check uses the full tree
-#                     dist_result, _ = tree_beta.query(ref_points[i], k=min(len(coords[beta]), num_ref_points + 1))
-#                     distances = np.atleast_1d(dist_result)
-#                     distances = distances[distances > 1e-6]
-#                 else:
-#                     if not neighbors_at_max_radius[i]: continue
-#                     distances = np.linalg.norm(tree_beta.data[neighbors_at_max_radius[i]] - ref_points[i], axis=1)
-
-#                 bins = np.floor(distances).astype(int)
-#                 for r in range(1, max_radius + 1):
-#                     count = np.sum(bins == r)
-#                     pair_counts[r] += count
-            
-#             # Density is calculated over the WHOLE patch volume
-#             rho_beta = level_counts[beta] / total_roi_voxels
-#             if rho_beta == 0: continue
-            
-#             for r in range(1, max_radius + 1):
-#                 if r in pair_counts:
-#                     dn = pair_counts[r] / num_ref_points
-#                     shell_volume = (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3)
-#                     if shell_volume > 0:
-#                         rdf_data[(alpha, beta)][r] = dn / (shell_volume * rho_beta)
-
-#     df_data = []
-#     for r in range(1, max_radius + 1):
-#         row = {'r': r}
-#         for alpha in range(num_levels):
-#             for beta in range(num_levels):
-#                 key = f'g_{alpha}_{beta}'
-#                 row[key] = rdf_data.get((alpha, beta), {}).get(r, 0)
-#         df_data.append(row)
-
-#     return pd.DataFrame(df_data)
-#     
-
-def calculate_geometric_factor(mask_array, max_radius, rdf_sample_points):
-    """
-    Calculates the 'Geometric Availability Factor' (g_geom) for the ROI.
-    It simulates a texture where every voxel has the same value (0).
-    Result: A Series where index is 'r' and value is the fraction of shell available (0.0-1.0).
-    """
-    # 1. Create a 'Uniform' image where all mask voxels are 0
-    # This removes all texture, leaving only geometry.
-    uniform_image = np.full(mask_array.shape, -1, dtype=np.int16)
-    mask_indices = mask_array > 0
-    uniform_image[mask_indices] = 0
-    
-    total_voxels = np.sum(mask_indices)
-    if total_voxels == 0: return pd.Series()
-
-    # 2. Run standard RDF calculation on this uniform image
-    # We use num_levels=1 because there is only "Gray Level 0"
-    rdf_geom_df = calculate_rdf_3d(
-        image_3d=uniform_image,
-        num_levels=1,
-        max_radius=max_radius,
-        level_counts=[total_voxels],
-        total_roi_voxels=total_voxels,
-        num_randomisations=0, # No randomization needed for geometry
-        rdf_sample_points=rdf_sample_points
-    )
-    
-    if rdf_geom_df.empty or 'g_0_0' not in rdf_geom_df.columns:
-        return pd.Series()
-
-    # 3. Extract the curve.
-    # g_0_0 here represents exactly: (Measured Density) / (Global Density)
-    # Since Global Density is constant, this curve is the Volume Fraction.
-    geom_factor = rdf_geom_df.set_index('r')['g_0_0']
-    
-    # Safety: geometric factor can't be 0 (would cause division by zero).
-    # We clip it to a small epsilon.
-    geom_factor = geom_factor.clip(lower=0.01)
-    
-    return geom_factor
-
-def apply_geometric_correction(rdf_df, geom_factor_series):
-    """
-    Divides every column in the RDF DataFrame by the Geometric Factor.
-    """
-    if rdf_df.empty or geom_factor_series.empty:
-        return rdf_df
-
-    corrected_df = rdf_df.copy()
-    r_values = corrected_df['r'].values
-    
-    # Align the geometric factor to the current RDF's 'r'
-    # (In case rows are missing, though they should match)
-    factors = geom_factor_series.reindex(r_values).fillna(1.0).values
-    
-    # Divide every g_x_y column by the factor
-    for col in corrected_df.columns:
-        if col.startswith('g_'):
-            corrected_df[col] = corrected_df[col] / factors
-            
-    return corrected_df
 
 
 def calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels):
@@ -1439,65 +1308,6 @@ def _calculate_anisotropic_glam_features_cpu(image_3d, num_levels, cutoff_radius
     return anisotropic_features
 
 
-# def calculate_glam_fractal_dimension(image_3d, num_levels):
-#     """Calculates Volume and Interface Fractal Dimensions using an optimized box-counting method."""
-#     # print("  - Starting Fractal Dimension analysis...")
-#     fractal_dimensions = {}
-
-#     def boxcount(binary_image, max_box_size=32):
-#         """Optimized helper function for box-counting algorithm using NumPy."""
-#         # CHANGE 1: Return 0.0 instead of NaN for empty bins
-#         if not np.any(binary_image): return 0.0
-        
-#         p = binary_image.shape
-#         scales = np.logspace(np.log2(2), np.log2(min(p)), num=8, base=2.0, dtype=np.int32)
-#         scales = np.unique(scales[scales > 1])
-        
-#         # CHANGE 2: Return 0.0 if object is too small for scaling analysis
-#         if len(scales) < 2: return 0.0
-        
-#         counts = np.array([np.sum(ndimage.maximum_filter(binary_image, size=s, mode='constant')[::s, ::s, ::s]) for s in scales])
-        
-#         valid_indices = counts > 0
-#         # CHANGE 3: Return 0.0 if not enough points for regression
-#         if np.sum(valid_indices) < 2:
-#             return 0.0 
-            
-#         scales_fit = scales[valid_indices]
-#         counts_fit = counts[valid_indices]
-        
-#         try:
-#             with np.errstate(divide='ignore'): 
-#                 coeffs = np.polyfit(np.log(scales_fit), np.log(counts_fit), 1)
-#             return -coeffs[0]
-#         except np.linalg.LinAlgError:
-#             # CHANGE 4: Return 0.0 on math error
-#             return 0.0
-        
-#     for i in range(num_levels):
-#         binary_image = (image_3d == i)
-#         fractal_dimensions[f'GLAM_VolumeFD_{i}'] = boxcount(binary_image)
-
-#     for i in range(num_levels):
-#         for j in range(num_levels):
-
-#             if i == j: continue
-
-#             mask_i = (image_3d == i)
-#             mask_j = (image_3d == j)
-            
-#             # CHANGE 5: Explicitly set 0.0 if masks are empty, don't just skip
-#             # This ensures the matrix builder finds a value.
-#             if not np.any(mask_i) or not np.any(mask_j): 
-#                 fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
-#                 continue
-                
-#             interface = ndimage.binary_dilation(mask_i) & mask_j
-#             fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = boxcount(interface)
-
-#     # print("  - Fractal Dimension analysis complete.")
-#     return fractal_dimensions
-
 def calculate_glam_fractal_dimension(image_3d, num_levels):
     """
     Calculates Volume and Interface Fractal Dimensions.
@@ -1610,73 +1420,6 @@ def _calculate_glam_fractal_dimension_cpu(image_3d, num_levels):
 
     return fractal_dimensions
 
-
-# def calculate_glam_lacunarity(image_3d, num_levels):
-#     """
-#     Calculates Volume and Interface Lacunarity.
-#     UPDATED: Returns 1.0 (instead of NaN) for empty/invalid regions.
-#     This ensures that Log(Lacunarity) becomes 0.0, avoiding empty cells.
-#     """
-#     lacunarity_features = {}
-    
-#     # Define box sizes to average over. 
-#     box_sizes = [2, 3, 4, 5] 
-    
-#     def get_lacunarity_for_mask(binary_mask):
-#         # CHANGE 1: Return 1.0 (perfect homogeneity) if mask is too small
-#         if np.sum(binary_mask) < 10: return 1.0
-        
-#         float_mask = binary_mask.astype(float)
-#         lac_values = []
-        
-#         for r in box_sizes:
-#             kernel = np.ones((r, r, r))
-            
-#             try:
-#                 mass_map = ndimage.convolve(float_mask, kernel, mode='constant', cval=0.0)
-#                 valid_masses = mass_map[mass_map > 0]
-                
-#                 if valid_masses.size < 2: continue
-                
-#                 mean_mass = np.mean(valid_masses)
-#                 var_mass = np.var(valid_masses)
-                
-#                 if mean_mass == 0: continue
-                
-#                 # Standard Lacunarity Formula
-#                 lambda_r = (var_mass / (mean_mass**2)) + 1
-#                 lac_values.append(lambda_r)
-                
-#             except Exception:
-#                 continue
-
-#         # CHANGE 2: Return 1.0 if calculation failed
-#         if not lac_values: return 1.0
-#         return np.mean(lac_values)
-
-#     # 1. Diagonal: Volume Lacunarity (Single Gray Levels)
-#     for i in range(num_levels):
-#         binary_image = (image_3d == i)
-#         lacunarity_features[f'GLAM_VolumeLacunarity_{i}'] = get_lacunarity_for_mask(binary_image)
-
-#     # 2. Off-Diagonal: Interface Lacunarity (Pairwise Boundaries)
-#     for i in range(num_levels):
-#         for j in range(num_levels):
-
-#             if i == j: continue
-
-#             mask_i = (image_3d == i)
-#             mask_j = (image_3d == j)
-            
-#             # CHANGE 3: Return 1.0 if one of the masks is empty
-#             if not np.any(mask_i) or not np.any(mask_j): 
-#                 lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = 1.0
-#                 continue
-            
-#             interface = ndimage.binary_dilation(mask_i) & mask_j
-#             lacunarity_features[f'GLAM_InterfaceLacunarity_{i}_{j}'] = get_lacunarity_for_mask(interface)
-
-#     return lacunarity_features
 
 def calculate_glam_lacunarity(image_3d, num_levels):
     """
@@ -4067,6 +3810,112 @@ def _calculate_glam_granulometry_cpu(image_3d, num_levels, max_radius=10):
             granulometry_features[f'GLAM_InterfaceGranulometryEntropy_{i}_{j}'] = ent_r
 
     return granulometry_features
+
+
+def calculate_glam_frustration_index(spi_metrics, cdi_metrics, num_levels, epsilon=1e-6):
+    """
+    Calculates the Structural Frustration Index (F) from pre-computed SPI and CDI.
+    Represents the ratio of structural stress to thermodynamic disorder (unjamming transition).
+    """
+    frustration_metrics = {}
+    
+    if not spi_metrics or not cdi_metrics:
+        return frustration_metrics
+        
+    for alpha in range(num_levels):
+        for beta in range(num_levels):
+            spi_key = f'GLAM_StructuralPressureIndex_{alpha}_{beta}'
+            cdi_key = f'GLAM_ConfigurationalDisorderIndex_{alpha}_{beta}'
+            frust_key = f'GLAM_FrustrationIndex_{alpha}_{beta}'
+            
+            spi_val = spi_metrics.get(spi_key, np.nan)
+            cdi_val = cdi_metrics.get(cdi_key, np.nan)
+            
+            if np.isnan(spi_val) or np.isnan(cdi_val):
+                frustration_metrics[frust_key] = np.nan
+            else:
+                # Calculate ratio with regularization to prevent division by zero
+                frustration_metrics[frust_key] = spi_val / (cdi_val + epsilon)
+                
+    return frustration_metrics
+
+def calculate_glam_local_packing_fraction(rdf_df, num_levels, level_counts, total_roi_voxels):
+    """
+    Calculates the Local Packing Fraction (\Phi) within the first coordination shell.
+    Represents the dimensionless volume fraction occupied by neighboring gray levels.
+    """
+    # --- Get config params ---
+    savgol_window = get_config('SavgolWindow')
+    savgol_poly = get_config('SavgolPoly')
+    peak_prominence = get_config('PeakProminence')
+
+    packing_fractions = {}
+    if rdf_df.empty or total_roi_voxels == 0: 
+        return packing_fractions
+
+    r = rdf_df['r'].values
+
+    for alpha in range(num_levels):
+        for beta in range(num_levels):
+            key = f'g_{alpha}_{beta}'
+            pack_key = f'GLAM_LocalPackingFraction_{alpha}_{beta}'
+
+            if key not in rdf_df.columns:
+                packing_fractions[pack_key] = np.nan
+                continue
+
+            g_r_raw = rdf_df[key].values
+
+            if len(g_r_raw) > savgol_window:
+                g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
+            else:
+                g_r = g_r_raw 
+
+            rho_beta = level_counts[beta] / total_roi_voxels if total_roi_voxels > 0 else 0
+
+            try:
+                # 1. Dynamically locate the first coordination shell
+                peaks, _ = find_peaks(g_r, prominence=peak_prominence)
+                
+                if len(peaks) == 0:
+                    search_r = min(len(g_r), 15)
+                    if search_r == 0: raise ValueError()
+                    first_peak_idx = np.argmax(g_r[:search_r])
+                    if first_peak_idx == 0: raise ValueError()
+                else:
+                    first_peak_idx = peaks[0]
+
+                minima, _ = find_peaks(-g_r[first_peak_idx:])
+                
+                if len(minima) == 0:
+                    r_min_idx = min(first_peak_idx * 2, len(r) - 1)
+                    if r_min_idx <= first_peak_idx: r_min_idx = len(r) - 1
+                else:
+                    r_min_idx = first_peak_idx + minima[0]
+
+                # 2. Calculate Coordination Number (Z) for the shell
+                integrand = g_r_raw[:r_min_idx+1] * r[:r_min_idx+1]**2
+                integral = np.trapezoid(integrand, r[:r_min_idx+1])
+                Z = 4 * np.pi * rho_beta * integral
+
+                # 3. Calculate Packing Fraction
+                # The radius boundary of the shell (adding 0.5 because r bins represent centers)
+                r_boundary = r[r_min_idx] + 0.5
+                
+                # Ideal volume of a sphere with this radius in voxel units
+                shell_volume_voxels = (4/3) * np.pi * (r_boundary**3)
+
+                if shell_volume_voxels > 0:
+                    packing_fractions[pack_key] = Z / shell_volume_voxels
+                else:
+                    packing_fractions[pack_key] = np.nan
+            except Exception:
+                packing_fractions[pack_key] = np.nan
+
+    return packing_fractions
+
+
+
 
 # def calculate_js_divergence_matrix(rdf_df, num_levels):
 #     """

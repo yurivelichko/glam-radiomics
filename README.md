@@ -4,6 +4,12 @@ This project introduces and implements a novel class of quantitative imaging fea
 
 The GLAM framework is written in Python and leverages high-performance libraries for medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
+## Citation
+
+If you use the GLAM framework in your research, please cite our paper:
+
+> **Physics-Informed Multiscale Decoding of Tissue Microstructure: The Gray Level Affinity Metrics (GLAM) Framework** > *Accepted for publication in the Journal of Imaging Informatics in Medicine (2026).*
+
 ## Installing from GitHub
 
 You can install GLAM-radiomics using the following command:
@@ -14,7 +20,7 @@ or
 ```Plaintext
 pip install glam-radiomics
 ```
-Note: This release (v1.4.9) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
+Note: This release (v1.5.0) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
 
 GPU Acceleration (Optional but Recommended): > GLAM features automatic GPU-accelerated matrix batching for massive speed improvements. To enable this, you must install CuPy. It is highly recommended to install the pre-compiled binary wheel that matches your system's NVIDIA CUDA version (e.g., pip install cupy-cuda12x) rather than running pip install cupy, which requires a complex C++ build environment and can cause installation failures.
 

@@ -40,6 +40,12 @@ Evaluates the macroscopic connectivity of discrete tissue states to determine if
 * **Cluster Number Density**: Measures the degree of spatial fragmentation by normalizing the total number of isolated clusters against the ROI volume.
 * **Percolation Strength**: A scale-invariant, volume-independent surrogate for the percolation threshold. It measures the probability that any given active site belongs to the primary spanning cluster.
 
+Mechanical Phase & Jamming Transitions
+--------------------------------------
+These features quantify the physical phase state of the tissue architecture, identifying regions of structural arrest versus active fluidization (unjamming).
+
+* **Local Packing Fraction**: Measures the dimensionless volume fraction physically occupied by neighboring gray levels within the first coordination shell.
+* **Structural Frustration Index**: The ratio of local structural stress to configurational disorder, mathematically isolating the exact conditions of the solid-to-fluid unjamming transition.
 Matrix Reduction Features
 -------------------------
 Once a multi-dimensional GLAM matrix is generated, the following statistics are extracted to create the final 1D feature vectors for machine learning:
@@ -58,8 +64,8 @@ Once a multi-dimensional GLAM matrix is generated, the following statistics are 
      - Structural heterogeneity of the affinity landscape matrix itself.
      - Contrast, Correlation, Joint Entropy.
    * - **Thermodynamic & State**
-     - Quantifies the interaction and physical arrangement of tissue clusters.
-     - Configurational Disorder Index, Pressure Virial, Coordination Number.
+     - Quantifies the interaction, physical arrangement, and phase state of tissue clusters.
+     - Configurational Disorder Index, Structural Pressure Index, Coordination Number, Frustration Index, Local Packing Fraction.
    * - **Profile Shape / Bimodality**
      - Detects structural separation and tissue layering on matrix diagonals.
      - Peak Separation, Bimodality Index, Roughness.
