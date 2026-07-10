@@ -194,7 +194,7 @@ The Local Packing Fraction grounds abstract spatial relationships into a dimensi
 
 where :math:`CN_{\alpha\beta}` is the Coordination Number and :math:`V_{shell}(r_{min})` is the exact geometric volume of the coordination shell.
 
-.. figure:: /_static/Whole_Tumor_GLAM_LocalPackingFraction.png
+.. figure:: /_static/GLAM_LocalPackingFraction.png
    :width: 700px
    :align: center
    :alt: Local Packing Fraction
@@ -214,7 +214,7 @@ The Structural Frustration Index mathematically isolates the thermodynamic condi
 
 where :math:`SPI_{\alpha\beta}` is the Structural Pressure Index, :math:`CDI_{\alpha\beta}` is the Configurational Disorder Index, and :math:`\epsilon` is a small regularization constant to prevent division by zero in highly ordered (crystalline) regions.
 
-.. figure:: /_static/Whole_Tumor_GLAM_FrustrationIndex.png
+.. figure:: /_static/GLAM_FrustrationIndex.png
    :width: 700px
    :align: center
    :alt: Structural Frustration Index
