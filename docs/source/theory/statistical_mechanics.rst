@@ -181,6 +181,51 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 * **Low Value**: Indicates the tissue architecture is very close to a completely random distribution of cells or voxels.
 
 
+Mechanical Phase and Jamming Transitions
+----------------------------------------
+These metrics describe the underlying mechanical phase state of the tissue architecture, determining whether a local microenvironment behaves as a structurally arrested (solid-like) mass or a yielding, invasive (fluid-like) network.
+
+Local Packing Fraction (:math:`\Phi`)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The Local Packing Fraction grounds abstract spatial relationships into a dimensionless, scale-invariant volume ratio. It measures the exact physical volume fraction occupied by neighboring gray levels within the first coordination shell, utilizing dynamic boundary-intersection normalizations.
+
+.. math::
+
+   \Phi_{\alpha\beta} = \frac{CN_{\alpha\beta}}{V_{shell}(r_{min})}
+
+where :math:`CN_{\alpha\beta}` is the Coordination Number and :math:`V_{shell}(r_{min})` is the exact geometric volume of the coordination shell.
+
+.. figure:: /_static/GLAM_LocalPackingFraction.png
+   :width: 700px
+   :align: center
+   :alt: Local Packing Fraction
+
+   **Figure:** Local Packing Fraction matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR).
+
+* **Interpretation**: This metric asks, *"Exactly what percentage of the available physical space around a central voxel of type A is consumed by voxels of type B?"*
+* **Advantage**: It is inherently bounded between 0.0 (empty) and 1.0 (perfectly solid), providing a highly tangible measure of micro-regional crowding and spatial saturation without requiring downstream mathematical transformations like log scaling.
+
+Structural Frustration Index (:math:`\mathcal{F}`)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The Structural Frustration Index mathematically isolates the thermodynamic conditions required for a solid-to-fluid unjamming transition. It is defined as the ratio of local structural stress to local configurational disorder:
+
+.. math::
+
+   \mathcal{F}_{\alpha\beta} = \frac{SPI_{\alpha\beta}}{CDI_{\alpha\beta} + \epsilon}
+
+where :math:`SPI_{\alpha\beta}` is the Structural Pressure Index, :math:`CDI_{\alpha\beta}` is the Configurational Disorder Index, and :math:`\epsilon` is a small regularization constant to prevent division by zero in highly ordered (crystalline) regions.
+
+.. figure:: /_static/GLAM_FrustrationIndex.png
+   :width: 700px
+   :align: center
+   :alt: Structural Frustration Index
+
+   **Figure:** Structural Frustration Index matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR).
+
+* **Interpretation**: This metric asks, *"Is this tissue microenvironment jammed under high structural tension but unable to rearrange (high frustration), or is it yielding and fluid-like (low frustration)?"*
+* **Advantage**: By combining pressure and disorder into a single non-linear filter, it creates massive mathematical contrast between structurally locked cores and actively invading, unjammed margins. It acts as a highly sensitive macroscopic phase identifier for prognostic modeling.
+
+
 Note on the Removal of JS Divergence (Asymmetry)
 ------------------------------------------------
 In earlier versions of GLAM, the Jensen-Shannon (JS) Divergence was calculated to measure the structural asymmetry between two interacting tissues by comparing the probability distribution of finding tissue B around A (``g_ij``) versus finding tissue A around B (``g_ji``). 
