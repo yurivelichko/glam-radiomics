@@ -4,7 +4,7 @@ Release Notes
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
 
-GLAM 1.5.1 (New Features & Matrices)
+GLAM 1.5.2 (New Features & Matrices)
 ---------------------------
 * July 2026
 * **Assembly Coupling Matrix (Thermodynamic Entanglement):**
