@@ -155,7 +155,7 @@ Averaging :math:`CDI(r)` within the first coordination shell yields a stable, ph
 
 1-Wasserstein Distance (Assembly Cost)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The 1-Wasserstein Distance, often called the Earth Mover's Distance, measures the "Biological Work" or "Assembly Cost" of the tumor's spatial architecture. It quantifies the total effort required to transform a completely randomized spatial distribution of voxels into the highly ordered, structured state actually observed in the tumor.
+The 1-Wasserstein Distance, often called the Earth Mover's Distance (EMD), measures the "Biological Work" or "Assembly Cost" of the tumor's spatial architecture. It quantifies the total effort required to transform a completely randomized spatial distribution of voxels into the highly ordered, structured state actually observed in the tumor.
 
 First, the Cumulative Coordination Number, :math:`N(R)`, is calculated. This represents the total number of neighbors accumulated up to radius :math:`R`:
 
@@ -182,11 +182,11 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 
 Assembly Coupling Matrix (Thermodynamic Entanglement)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The Assembly Coupling Matrix measures the thermodynamic entanglement between different tissue states. By taking the mixed partial derivative of the 1-Wasserstein Distance (Assembly Cost) with respect to both the reference state $\alpha$ and target state $\beta$, it quantifies how the structural formation of one gray level interferes with or facilitates another.
+The Assembly Coupling Matrix measures the thermodynamic entanglement between different tissue states. By taking the mixed partial derivative of the 1-Wasserstein Distance (Assembly Cost) with respect to both the reference state :math:`\alpha`$` and target state :math:`\beta`$`, it quantifies how the structural formation of one gray level interferes with or facilitates another.
 
 .. math::
 
-   \mathcal{X}_{\alpha\beta} = \frac{\partial^2 \text{EMD}_{\alpha\beta}}{\partial \alpha \partial \beta}
+   \mathcal{X}_{\alpha\beta} = \frac{\partial^2  W_{\alpha\beta}}{\partial \alpha \partial \beta}
 
 Because the raw derivative values scale exponentially at phase boundaries, a Symmetric Logarithm (SymLog10) transform is applied to compress extreme magnitudes while strictly preserving the thermodynamic sign.
 
@@ -207,13 +207,13 @@ Because the raw derivative values scale exponentially at phase boundaries, a Sym
 
 Phenotypic Distance Matrix (Phase-Space EMD)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Instead of comparing a tissue state to a randomized baseline, the Phenotypic Distance Matrix directly compares the morphological architecture of two distinct gray levels, $\alpha$ and $\beta$. It computes the 1-Wasserstein Distance (Earth Mover's Distance) between their normalized auto-correlation Cumulative Distribution Functions (CDFs), $F(r)$.
+Instead of comparing a tissue state to a randomized baseline, the Phenotypic Distance Matrix directly compares the morphological architecture of two distinct gray levels, :math:`\alpha`$` and :math:`\beta`$`. It computes the 1-Wasserstein Distance (Earth Mover's Distance) between their normalized auto-correlation Cumulative Distribution Functions (CDFs), :math:`F(r)`$`.
 
 .. math::
 
    \mathcal{W}_{\alpha \rightarrow \beta} = \int_{0}^{R_{max}} \left\vert{} F_\alpha(r) - F_\beta(r) \right\vert{} dr
 
-This produces a strictly non-negative, perfectly symmetric distance matrix ($\mathcal{W}_{\alpha \rightarrow \beta} = \mathcal{W}_{\beta \rightarrow \alpha}$) with zeros along the main diagonal. Because it is a true distance metric bounded by the maximum integration radius, no downstream logarithmic transformations are required.
+This produces a strictly non-negative, perfectly symmetric distance matrix (:math:`\mathcal{W}_{\alpha \rightarrow \beta} = \mathcal{W}_{\beta \rightarrow \alpha}`$`) with zeros along the main diagonal. Because it is a true distance metric bounded by the maximum integration radius, no downstream logarithmic transformations are required.
 
 * **Low Value (Morphological Mimicry)**: The two states have highly similar spatial topologies, meaning the tissue can shift intensities with nearly zero topological reorganization cost.
 * **High Value (Structural Barrier)**: The states possess vastly different spatial architectures, requiring massive biological energy to physically tear down and rebuild the tissue topology during a phase transition.
