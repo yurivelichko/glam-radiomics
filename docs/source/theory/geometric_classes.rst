@@ -51,7 +51,7 @@ Anisotropy Indices
 GLAM captures directional organization (e.g., in aligned stromal bands) using gyration and nematic ordering tensors.
 
 * **Positional Anisotropy**: Uses the Relative Shape Anisotropy index, :math:`A_{\alpha,\beta}`, to quantify geometric elongation derived from the eigenvalues of the local gyration tensor.
-* **Orientational Anisotropy**: Calculates the **Nematic Order Parameter (:math:`S`)**, analogous to liquid crystal physics, to quantify the degree of alignment of local intensity gradients. :math:`S=0` represents random orientation, while :math:`S=1` indicates perfect alignment.
+* **Orientational Anisotropy**: Calculates the **Nematic Order Parameter** (:math:`S`), analogous to liquid crystal physics, to quantify the degree of alignment of local intensity gradients. :math:`S=0` represents random orientation, while :math:`S=1` indicates perfect alignment.
 
 .. figure:: /_static/GLAM_Anisotropy.png
    :width: 700px
@@ -71,8 +71,8 @@ Fractal and Multifractal Dimensions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 GLAM utilizes a 3D box-counting algorithm to quantify multiscale self-similarity and complexity.
 
-* **Volume Fractal Dimension (:math:`D_V`)**: Calculated for voxels of a single gray level, indicating its space-filling capacity.
-* **Interface Fractal Dimension (:math:`D_I`)**: Measures the roughness and invasiveness of boundaries between two tissue types.
+* **Volume Fractal Dimension** (:math:`D_V`): Calculated for voxels of a single gray level, indicating its space-filling capacity.
+* **Interface Fractal Dimension** (:math:`D_I`): Measures the roughness and invasiveness of boundaries between two tissue types.
 * **Multifractal Spectrum**: Employs Generalized Dimensions (:math:`D_q`) to characterize tissues where scaling properties vary across the region. The spectrum width (:math:`\Delta\alpha`) quantifies the diversity of scaling behaviors, representing the "heterogeneous chaos" of the tissue.
 
 .. figure:: /_static/GLAM_FractalDimension.png
@@ -149,7 +149,7 @@ Percolation Metrics
 ~~~~~~~~~~~~~~~~~~~
 Percolation theory evaluates the connectivity of voxel clusters to determine how local tissue states connect to form macroscopic, spanning networks. It bridges the gap between local discrete morphology and global tissue architecture by quantifying whether a specific tissue type forms a continuous network or exists as isolated fragments. GLAM quantifies this using three primary matrices:
 
-* **Maximum Cluster Size (** :math:`S_{max}` **)**: The absolute voxel count of the largest connected cluster of a specific gray level. It represents the raw biological burden of the largest continuous region (e.g., the absolute volume of the largest contiguous necrotic core).
+* **Maximum Cluster Size** (:math:`S_{max}`): The absolute voxel count of the largest connected cluster of a specific gray level. It represents the raw biological burden of the largest continuous region (e.g., the absolute volume of the largest contiguous necrotic core).
 
 .. figure:: /_static/GLAM_MaxClusterSize_Ln.png
    :width: 700px
@@ -158,7 +158,7 @@ Percolation theory evaluates the connectivity of voxel clusters to determine how
 
    **Figure:** Maximum Cluster Size matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
-* **Cluster Number Density (** :math:`n_c` **)**: The total number of isolated clusters normalized by the total ROI volume (:math:`N_{clusters} / V_{ROI}`). It quantifies the degree of macroscopic fragmentation.
+* **Cluster Number Density** (:math:`n_c`): The total number of isolated clusters normalized by the total ROI volume (:math:`N_{clusters} / V_{ROI}`). It quantifies the degree of macroscopic fragmentation.
 
 .. figure:: /_static/GLAM_ClusterNumberDensity.png
    :width: 700px

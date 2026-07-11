@@ -114,7 +114,7 @@ In the GLAM framework, this metric quantifies the "sponginess" or susceptibility
 
 Structural Pressure Index (:math:`SPI`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Broadly analogous to the virial equation of state, the Structural Pressure Index (SPI) utilizes a PMF-derived potential of mean force, :math:`W(r)`, to serve as a pressure-like structural descriptor. It quantifies the mean pseudomechanical force between voxel populations, capturing the spatial packing and mechanical-like response within the texture.
+Broadly analogous to the virial equation of state, the Structural Pressure Index (SPI) utilizes a PMF-derived potential of mean force, :math:`W_{\alpha\beta}(r)`, to serve as a pressure-like structural descriptor. It quantifies the mean pseudomechanical force between voxel populations, capturing the spatial packing and mechanical-like response within the texture.
 
 .. math::
 
@@ -361,3 +361,5 @@ Finally, standard JS Divergence is applied to these smoothed, cumulative curves:
 
 * **Interpretation**: This metric asks, *"If we grow a sphere outward, does the total accumulated mass of tissue B around tissue A grow at the same rate as tissue A around tissue B?"*
 * **Advantage**: It is highly robust to minor spatial jitter, imaging noise, and voxelation artifacts, providing a much more stable measure of macroscopic architectural bias.
+
+
