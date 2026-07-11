@@ -180,7 +180,7 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 * **Low Value**: Indicates the tissue architecture is very close to a completely random distribution of cells or voxels.
 
 
-### Assembly Coupling Matrix (Thermodynamic Entanglement)
+Assembly Coupling Matrix (Thermodynamic Entanglement)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The Assembly Coupling Matrix measures the thermodynamic entanglement between different tissue states. By taking the mixed partial derivative of the 1-Wasserstein Distance (Assembly Cost) with respect to both the reference state $\alpha$ and target state $\beta$, it quantifies how the structural formation of one gray level interferes with or facilitates another.
 
@@ -205,7 +205,7 @@ Because the raw derivative values scale exponentially at phase boundaries, a Sym
 * **Advantage**: It distills complex topological and thermodynamic states into a pure map of biological alliances and competitions within the tumor ecosystem.
 
 
-### Phenotypic Distance Matrix (Phase-Space EMD)
+Phenotypic Distance Matrix (Phase-Space EMD)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Instead of comparing a tissue state to a randomized baseline, the Phenotypic Distance Matrix directly compares the morphological architecture of two distinct gray levels, $\alpha$ and $\beta$. It computes the 1-Wasserstein Distance (Earth Mover's Distance) between their normalized auto-correlation Cumulative Distribution Functions (CDFs), $F(r)$.
 
