@@ -3,6 +3,19 @@ Release Notes
 
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
+
+GLAM 1.5.1 (New Features & Matrices)
+---------------------------
+* July 2026
+* **Assembly Coupling Matrix (Thermodynamic Entanglement):**
+  * Added ``calculate_glam_assembly_coupling_matrix`` to compute the mixed partial derivative of the 1-Wasserstein Distance (:math:`\frac{\partial^2 \text{EMD}}{\partial \alpha \partial \beta}`). 
+  * This matrix maps the structural alliances (synergistic assembly) and competitions (antagonistic assembly) between different tissue phenotypes.
+  * **Technical Note:** Includes a native :math:`\text{SymLog}_{10}` transformation to compress the extreme exponential spikes at phase boundaries while strictly preserving the thermodynamic sign.
+* **Phenotypic Distance Matrix (Phase-Space EMD):**
+  * Added ``calculate_glam_phenotypic_distance_matrix`` to directly compare the morphological architectures of distinct gray levels.
+  * Calculates the 1-Wasserstein Distance between normalized auto-correlation Cumulative Distribution Functions (CDFs).
+  * **Technical Note:** Eliminates the randomized baseline to create a true, bounded, non-negative mathematical distance metric in morphological phase-space, making it ideal for downstream K-Means or hierarchical habitat clustering.
+
 GLAM 1.5.0 (Core Engine Update)
 ---------------------------
 * July 2026

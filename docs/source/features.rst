@@ -24,6 +24,8 @@ These features treat the tumor as a many-body physical system, calculating therm
 * **Configurational Disorder Index**: (Formerly Effective Temperature) Quantifies the thermodynamic disorder strictly within the first coordination shell.
 * **Structural Pressure Index (SPI)**: Formally analogous to the interaction component of pressure.
 * **1-Wasserstein Distance (EMD)**: Measures the 'Biological Work' or 'Assembly Cost' of the tumor's spatial architecture by comparing the structured and random cumulative coordination profiles.
+* **Assembly Coupling Matrix (Thermodynamic Entanglement)**: Measures the thermodynamic entanglement between different tissue states. 
+* **Phenotypic Distance Matrix (Phase-Space EMD)**: Compares the morphological architecture of two distinct gray levels.
 
 Soft Matter & Geometric Classes
 -------------------------------

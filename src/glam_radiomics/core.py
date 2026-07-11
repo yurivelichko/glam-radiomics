@@ -2555,6 +2555,7 @@ def calculate_rdf_shape_matrices(rdf_df, num_levels):
         "LogRDF_PeakHeight": mat_log_peak_height
     }
 
+
 def calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels):
     """
     Calculates the 1-Wasserstein Distance (Earth Mover's Distance) between 
@@ -2594,6 +2595,85 @@ def calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_le
                 wasserstein_distances[f'GLAM_Wasserstein_{alpha}_{beta}'] = w_dist
                 
     return wasserstein_distances
+
+def calculate_glam_assembly_coupling_matrix(wasserstein_distances, num_levels):
+    """
+    Calculates the Assembly Coupling Matrix (Thermodynamic Entanglement).
+    Computes the mixed partial derivative of the 1-Wasserstein Distance 
+    with respect to reference state alpha and target state beta (∂²EMD / ∂α∂β).
+    """
+    coupling_features = {}
+    if not wasserstein_distances:
+        return coupling_features
+        
+    # 1. Reconstruct the 2D EMD Matrix
+    emd_matrix = np.zeros((num_levels, num_levels))
+    for alpha in range(num_levels):
+        for beta in range(num_levels):
+            key = f'GLAM_Wasserstein_{alpha}_{beta}'
+            emd_matrix[alpha, beta] = wasserstein_distances.get(key, 0.0)
+            
+    # 2. Compute Discrete Derivatives
+    # First derivative with respect to alpha (rows, axis=0) -> Chemical Potential
+    dEMD_dalpha = np.gradient(emd_matrix, axis=0)
+    
+    # Second derivative with respect to beta (columns, axis=1) -> Assembly Coupling
+    d2EMD_dalpha_dbeta = np.gradient(dEMD_dalpha, axis=1)
+    
+    # 3. Flatten back to GLAM dictionary format
+    for alpha in range(num_levels):
+        for beta in range(num_levels):
+            key = f'GLAM_AssemblyCoupling_{alpha}_{beta}'
+            coupling_features[key] = d2EMD_dalpha_dbeta[alpha, beta]
+            
+    return coupling_features
+
+def calculate_glam_phenotypic_distance_matrix(rdf_df, num_levels, level_counts, total_roi_voxels):
+    """
+    Calculates the Phenotypic Distance Matrix (Phase-Space Optimal Transport).
+    Measures the exact morphological distance between the spatial topologies of different 
+    gray levels (α and β) by comparing their normalized auto-correlation CDFs.
+    """
+    phenotypic_features = {}
+    if rdf_df.empty or total_roi_voxels == 0: 
+        return phenotypic_features
+        
+    r = rdf_df['r'].values
+    cdfs = np.zeros((num_levels, len(r)))
+    
+    # 1. Build the Normalized CDF for every gray level's auto-correlation (self-texture)
+    for i in range(num_levels):
+        key = f'g_{i}_{i}'
+        if key in rdf_df.columns and level_counts[i] > 0:
+            rho_i = level_counts[i] / total_roi_voxels
+            g_r = rdf_df[key].values
+            
+            # Incorporate the spherical volume element
+            integrand = 4 * np.pi * rho_i * g_r * (r**2)
+            
+            # Calculate the Cumulative Coordination Number N_i(r)
+            N_r = scipy.integrate.cumulative_trapezoid(integrand, r, initial=0)
+            
+            # Normalize to 1 to create a true probability Cumulative Distribution Function
+            max_val = N_r[-1]
+            if max_val > 1e-9:
+                cdfs[i] = N_r / max_val
+                
+    # 2. Calculate the Phase-Space EMD (Area between the CDFs)
+    for alpha in range(num_levels):
+        for beta in range(num_levels):
+            # If both are empty biological states, the topological distance is 0
+            if level_counts[alpha] == 0 and level_counts[beta] == 0:
+                dist = 0.0
+            else:
+                # The 1-Wasserstein Distance is the absolute integral of the CDF differences
+                diff = np.abs(cdfs[alpha] - cdfs[beta])
+                dist = np.trapezoid(diff, r)
+                
+            phenotypic_features[f'GLAM_PhenotypicDistance_{alpha}_{beta}'] = float(dist)
+            
+    return phenotypic_features
+
 
 def calculate_first_order_stats_from_matrix(matrix, feature_prefix):
     """Calculates first-order statistics for a given matrix OR vector."""

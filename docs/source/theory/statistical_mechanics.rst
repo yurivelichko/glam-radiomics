@@ -28,22 +28,22 @@ To capture the extensive information embedded in the full RDF curves without inc
 .. figure:: /_static/GLAM_LogRDF_Kurtosis.png
    :width: 700px
    :align: center
-   :alt: Second Virial Coefficient 
+   :alt: GLAM LogRDF Kurtosis 
 
    **Figure:** RDF Kurtosis matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
-.. figure:: /_static/GLAM_RDF_PeakPosition.png
+.. figure:: /_static/GLAM_RDF_Median.png
    :width: 700px
    :align: center
-   :alt: Second Virial Coefficient 
+   :alt: GLAM RDF Median 
 
-   **Figure:** RDF Peak Position matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+   **Figure:** RDF Median matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
 
 .. figure:: /_static/GLAM_RDF_DispersionRatio_Ln.png
    :width: 700px
    :align: center
-   :alt: Second Virial Coefficient 
+   :alt: GLAM RDF DispersionRatio 
 
    **Figure:** RDF Dispersion Ratio matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
@@ -90,7 +90,7 @@ To allow size-independent comparison across ROIs, the UPMF is normalized by volu
 .. figure:: /_static/GLAM_EnergyDensity.png
    :width: 700px
    :align: center
-   :alt: Second Virial Coefficient 
+   :alt: Energy Density 
 
    **Figure:** Energy Density matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
@@ -145,7 +145,7 @@ Averaging :math:`CDI(r)` within the first coordination shell yields a stable, ph
 .. figure:: /_static/GLAM_ConfigurationalDisorderIndex_Symlog.png
    :width: 700px
    :align: center
-   :alt: Structural Pressure Index Matrix
+   :alt: Configurational Disorder Index Matrix
    
    **Figure:** Configurational Disorder Index matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
@@ -172,13 +172,61 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 .. figure:: /_static/GLAM_Wasserstein_Ln.png
    :width: 700px
    :align: center
-   :alt: Structural Pressure Index Matrix
+   :alt: 1-Wasserstein Distance Matrix
    
    **Figure:** Wasserstein matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
-
 * **High Value**: Indicates a highly complex, non-random architecture with a high energetic "cost" of assembly, typical of highly organized distinct sub-regions or rigid boundaries.
 * **Low Value**: Indicates the tissue architecture is very close to a completely random distribution of cells or voxels.
+
+
+### Assembly Coupling Matrix (Thermodynamic Entanglement)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The Assembly Coupling Matrix measures the thermodynamic entanglement between different tissue states. By taking the mixed partial derivative of the 1-Wasserstein Distance (Assembly Cost) with respect to both the reference state $\alpha$ and target state $\beta$, it quantifies how the structural formation of one gray level interferes with or facilitates another.
+
+.. math::
+
+   \mathcal{X}_{\alpha\beta} = \frac{\partial^2 \text{EMD}_{\alpha\beta}}{\partial \alpha \partial \beta}
+
+Because the raw derivative values scale exponentially at phase boundaries, a Symmetric Logarithm (SymLog10) transform is applied to compress extreme magnitudes while strictly preserving the thermodynamic sign.
+
+* **Positive Value (Antagonistic Assembly)**: The two tissue states structurally compete for the same microenvironmental space (e.g., an expanding solid core pushing against an unyielding stroma).
+* **Negative Value (Synergistic Assembly)**: The states are structurally cooperative, where the presence of one lowers the thermodynamic barrier to assemble the other (e.g., angiogenesis actively facilitating dense cellular packing).
+* **Zero Value**: Structural independence.
+
+.. figure:: /_static/GLAM_AssemblyCoupling_Symlog.png
+   :width: 700px
+   :align: center
+   :alt: Assembly Coupling Matrix
+   
+   **Figure:** Assembly Coupling matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+* **Interpretation**: This metric asks, *"If the tumor mutates to increase tissue type B, does that make it biologically harder (antagonistic) or easier (synergistic) to build tissue type A?"*
+* **Advantage**: It distills complex topological and thermodynamic states into a pure map of biological alliances and competitions within the tumor ecosystem.
+
+
+### Phenotypic Distance Matrix (Phase-Space EMD)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Instead of comparing a tissue state to a randomized baseline, the Phenotypic Distance Matrix directly compares the morphological architecture of two distinct gray levels, $\alpha$ and $\beta$. It computes the 1-Wasserstein Distance (Earth Mover's Distance) between their normalized auto-correlation Cumulative Distribution Functions (CDFs), $F(r)$.
+
+.. math::
+
+   \mathcal{W}_{\alpha \rightarrow \beta} = \int_{0}^{R_{max}} \left\vert{} F_\alpha(r) - F_\beta(r) \right\vert{} dr
+
+This produces a strictly non-negative, perfectly symmetric distance matrix ($\mathcal{W}_{\alpha \rightarrow \beta} = \mathcal{W}_{\beta \rightarrow \alpha}$) with zeros along the main diagonal. Because it is a true distance metric bounded by the maximum integration radius, no downstream logarithmic transformations are required.
+
+* **Low Value (Morphological Mimicry)**: The two states have highly similar spatial topologies, meaning the tissue can shift intensities with nearly zero topological reorganization cost.
+* **High Value (Structural Barrier)**: The states possess vastly different spatial architectures, requiring massive biological energy to physically tear down and rebuild the tissue topology during a phase transition.
+
+.. figure:: /_static/GLAM_PhenotypicDistance.png
+   :width: 700px
+   :align: center
+   :alt: Phenotypic Distance Matrix
+   
+   **Figure:** Phenotypic Distance matrices derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+
+* **Interpretation**: This metric asks, *"Regardless of their contrast intensity, how physically similar are the spatial packing architectures of tissue A and tissue B?"*
+* **Advantage**: It provides a true mathematical distance metric in morphological phase-space, allowing downstream clustering algorithms to objectively group distinct gray levels into physically identical "habitats."
 
 
 Mechanical Phase and Jamming Transitions

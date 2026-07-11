@@ -45,6 +45,8 @@ from .core import (
     calculate_symmetry_features,
     calculate_rdf_shape_matrices,
     calculate_glam_wasserstein_distance,
+    calculate_glam_assembly_coupling_matrix,
+    calculate_glam_phenotypic_distance_matrix,
     calculate_cluster_features,
     calculate_profile_shape_features,
     calculate_glam_percolation,
@@ -188,6 +190,7 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
     spi_feats = calculate_glam_structural_pressure_index(rdf_structured_df, num_levels, level_counts, total_roi_voxels)
     cdi_feats = calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels)
     frustration_feats = calculate_glam_frustration_index(spi_feats, cdi_feats, num_levels)
+    wasserstein_distance = calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels)
 
     print("  - Starting Primary GLAM Feature calculation...")
     glam_features = {
@@ -206,10 +209,11 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
         **frustration_feats,
         **calculate_glam_local_packing_fraction(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
         **calculate_glam_shape_matrices(structured_glam_image, num_levels, spacing),
-        **calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels),
+        **wasserstein_distance,
+        **calculate_glam_assembly_coupling_matrix(wasserstein_distance, num_levels),
+        **calculate_glam_phenotypic_distance_matrix(rdf_structured_df, num_levels, level_counts, total_roi_voxels),
         **calculate_glam_percolation(structured_glam_image, num_levels, total_roi_voxels),
         **calculate_glam_granulometry(structured_glam_image, num_levels, max_radius=10)
-        
     }
     return glam_features
 
@@ -294,6 +298,8 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "FrustrationIndex": ("GLAM_FrustrationIndex_", None), 
         "LocalPackingFraction": ("GLAM_LocalPackingFraction_", None),
         "Wasserstein": ("GLAM_Wasserstein_", None),
+        "AssemblyCoupling": ("GLAM_AssemblyCoupling_", None),
+        "PhenotypicDistance": ("GLAM_PhenotypicDistance_", None),        
         "FractalDimension": ("GLAM_InterfaceFD_", "GLAM_VolumeFD_"),
         "MultifractalWidth": ("GLAM_InterfaceMultifractal_Width_", "GLAM_VolumeMultifractal_Width_"),
         "MultifractalAlpha0": ("GLAM_InterfaceMultifractal_Alpha0_", "GLAM_VolumeMultifractal_Alpha0_"),
@@ -366,7 +372,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     symlog_targets = [  'StructuralPressureIndex', 'ConfigurationalDisorderIndex', 'B2', 'PotentialEnergy', 
                         'RDF_Kurtosis', 'RDF_Skewness', 'Euler', 
                         'Betti0_Excess', 'Betti1_Excess', 'Betti2_Excess', 'Euler_Excess',
-                        'GranulometrySkewness', 'GranulometryKurtosis']
+                        'GranulometrySkewness', 'GranulometryKurtosis', 'AssemblyCoupling']
     
     for name in symlog_targets:
         if name in glam_matrices:
