@@ -5,11 +5,11 @@ The foundation of the GLAM framework is the adaptation of rigorous formalism fro
 
 Radial Distribution Function (RDF)
 ----------------------------------
-The core descriptor is the pair radial distribution function, :math:`g_{\alpha\beta}(r)`, which measures the spatial correlation between voxels [40]. It quantifies the relative likelihood of finding a voxel with gray level :math:`\beta` at a distance :math:`r` from a reference voxel with gray level :math:`\alpha` [41].
+The core descriptor is the pair radial distribution function, :math:`g_{\alpha\beta}(r)`, which measures the spatial correlation between voxels. It quantifies the relative likelihood of finding a voxel with gray level :math:`\beta` at a distance :math:`r` from a reference voxel with gray level :math:`\alpha`.
 
-* **Positive Correlation (Attraction)**: :math:`g_{\alpha\beta}(r) > 1` [42].
-* **Negative Correlation (Repulsion)**: :math:`g_{\alpha\beta}(r) < 1` [42].
-* **Randomness**: :math:`g_{\alpha\beta}(r) = 1` [42].
+* **Positive Correlation (Attraction)**: :math:`g_{\alpha\beta}(r) > 1`.
+* **Negative Correlation (Repulsion)**: :math:`g_{\alpha\beta}(r) < 1`.
+* **Randomness**: :math:`g_{\alpha\beta}(r) = 1`.
 
 .. figure:: /_static/GLAM_RDF.png
    :width: 700px
@@ -52,14 +52,14 @@ Key Thermodynamic Metrics
 
 Second Virial Coefficient (:math:`B_2`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The second virial coefficient distills the complex, distance-dependent information of the entire RDF curve into a single value representing net affinity[cite: 66].
+The second virial coefficient distills the complex, distance-dependent information of the entire RDF curve into a single value representing net affinity.
 
 .. math::
 
    B_{2\alpha, \beta} = -2\pi \int_{0}^{R_{max}} [g_{structured}(r) - g_{randomized}(r)] r^2 dr
 
-* **Negative value**: Indicates net attraction or affinity between gray levels[cite: 66].
-* **Positive value**: Suggests net repulsion[cite: 66].
+* **Negative value**: Indicates net attraction or affinity between gray levels.
+* **Positive value**: Suggests net repulsion.
 
 .. figure:: /_static/GLAM_B2_Symlog.png
    :width: 700px
@@ -73,7 +73,7 @@ The second virial coefficient distills the complex, distance-dependent informati
 
 Potential of Mean Force (PMF)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To evaluate the energetic stability of texture organization, GLAM computes the PMF based on the Boltzmann distribution[cite: 67, 68].
+To evaluate the energetic stability of texture organization, GLAM computes the PMF based on the Boltzmann distribution.
 
 .. math::
 
@@ -99,13 +99,13 @@ To allow size-independent comparison across ROIs, the UPMF is normalized by volu
 
 Isothermal Compressibility (:math:`\kappa_T`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-In statistical thermodynamics, the integral of the total correlation function is directly related to the system's density fluctuations and its isothermal compressibility[cite: 628]. 
+In statistical thermodynamics, the integral of the total correlation function is directly related to the system's density fluctuations and its isothermal compressibility. 
 
 .. math::
 
    \kappa_T \propto \int_{0}^{R_{max}} [g_{\alpha\beta}(r) - 1] r^2 dr
 
-In the GLAM framework, this metric quantifies the "sponginess" or susceptibility of the texture to local density variations[cite: 630]. High compressibility implies large-scale density fluctuations and a tendency for the voxel population to cluster loosely, whereas low compressibility indicates a rigid, hyper-uniform distribution typical of highly packed cellular structures[cite: 631].
+In the GLAM framework, this metric quantifies the "sponginess" or susceptibility of the texture to local density variations. High compressibility implies large-scale density fluctuations and a tendency for the voxel population to cluster loosely, whereas low compressibility indicates a rigid, hyper-uniform distribution typical of highly packed cellular structures.
 
 ----
 
