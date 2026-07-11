@@ -182,7 +182,7 @@ The Wasserstein distance is then defined as the absolute area between the cumula
 
 Assembly Coupling Matrix (Thermodynamic Entanglement)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The Assembly Coupling Matrix measures the thermodynamic entanglement between different tissue states. By taking the mixed partial derivative of the 1-Wasserstein Distance (Assembly Cost) with respect to both the reference state :math:`\alpha`$` and target state :math:`\beta`$`, it quantifies how the structural formation of one gray level interferes with or facilitates another.
+The Assembly Coupling Matrix measures the thermodynamic entanglement between different tissue states. By taking the mixed partial derivative of the 1-Wasserstein Distance (Assembly Cost) with respect to both the reference state :math:`\alpha` and target state :math:`\beta`, it quantifies how the structural formation of one gray level interferes with or facilitates another.
 
 .. math::
 
