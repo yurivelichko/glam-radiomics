@@ -209,12 +209,12 @@ Where:
 * :math:`M(i, j)_{\text{structured}}` is the measured topological feature in the actual tumor image.
 * :math:`M(i, j)_{\text{random}}` is the expected topological feature if the tissue voxels were mixed perfectly at random.
 
-.. figure:: /_static/GLAM_Euler_Excess_Symlog.png
+.. figure:: /_static/GLAM_Betti1_Excess_Symlog.png
    :width: 700px
    :align: center
    :alt: Second Virial Coefficient 
 
-   **Figure:** Euler Characteristic Excess matrices (Symlog) derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
+   **Figure:** Betti-1 Excess matrices (Symlog) derived from four co-registered MRI sequences: pre-contrast T1-weighted (T1), post-contrast T1-weighted (T1c), T2-weighted (T2), and Fluid-Attenuated Inversion Recovery (FLAIR). 
 
 **General Interpretation:**
 
