@@ -207,13 +207,13 @@ Because the raw derivative values scale exponentially at phase boundaries, a Sym
 
 Phenotypic Distance Matrix (Phase-Space EMD)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Instead of comparing a tissue state to a randomized baseline, the Phenotypic Distance Matrix directly compares the morphological architecture of two distinct gray levels, :math:`\alpha`$` and :math:`\beta`$`. It computes the 1-Wasserstein Distance (Earth Mover's Distance) between their normalized auto-correlation Cumulative Distribution Functions (CDFs), :math:`F(r)`$`.
+Instead of comparing a tissue state to a randomized baseline, the Phenotypic Distance Matrix directly compares the morphological architecture of two distinct gray levels, :math:`\alpha` and :math:`\beta`. It computes the 1-Wasserstein Distance between their normalized auto-correlation Cumulative Distribution Functions (CDFs), :math:`F(r)`.
 
 .. math::
 
    \mathcal{W}_{\alpha \rightarrow \beta} = \int_{0}^{R_{max}} \left\vert{} F_\alpha(r) - F_\beta(r) \right\vert{} dr
 
-This produces a strictly non-negative, perfectly symmetric distance matrix (:math:`\mathcal{W}_{\alpha \rightarrow \beta} = \mathcal{W}_{\beta \rightarrow \alpha}`$`) with zeros along the main diagonal. Because it is a true distance metric bounded by the maximum integration radius, no downstream logarithmic transformations are required.
+This produces a strictly non-negative, perfectly symmetric distance matrix (:math:`\mathcal{W}_{\alpha \rightarrow \beta} = \mathcal{W}_{\beta \rightarrow \alpha}`) with zeros along the main diagonal. Because it is a true distance metric bounded by the maximum integration radius, no downstream logarithmic transformations are required.
 
 * **Low Value (Morphological Mimicry)**: The two states have highly similar spatial topologies, meaning the tissue can shift intensities with nearly zero topological reorganization cost.
 * **High Value (Structural Barrier)**: The states possess vastly different spatial architectures, requiring massive biological energy to physically tear down and rebuild the tissue topology during a phase transition.
