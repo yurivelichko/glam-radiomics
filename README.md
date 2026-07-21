@@ -8,7 +8,8 @@ The GLAM framework is written in Python and leverages high-performance libraries
 
 If you use the GLAM framework in your research, please cite our paper:
 
-> **Physics-Informed Multiscale Decoding of Tissue Microstructure: The Gray Level Affinity Metrics (GLAM) Framework** > * J Digit Imaging. Inform. med. (2026). https://doi.org/10.1007/s10278-026-02132-6*
+> **Physics-Informed Multiscale Decoding of Tissue Microstructure: The Gray Level Affinity Metrics (GLAM) Framework** > * Journal of Imaging Informatics in Medicine (2026)*
+* https://doi.org/10.1007/s10278-026-02132-6 
 * https://link.springer.com/article/10.1007/s10278-026-02132-6
 > 
 ## Installing from GitHub
