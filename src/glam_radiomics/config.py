@@ -48,6 +48,7 @@ def load_config(config_path):
             ))
 
         # File_Naming
+        parsed['NormMaskIdentifiers'] = json.loads(config.get('File_Naming', 'NormMaskIdentifiers', fallback='[]'))
         parsed['MaskIdentifiers'] = json.loads(config.get('File_Naming', 'MaskIdentifiers'))
         parsed['SequenceIdentifiers'] = json.loads(config.get('File_Naming', 'SequenceIdentifiers'))
 

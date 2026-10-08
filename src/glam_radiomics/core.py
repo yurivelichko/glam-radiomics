@@ -705,6 +705,7 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
     dev = cp.cuda.Device(0)
     free_mem, _ = dev.mem_info
     safe_vram_bytes = free_mem * 0.5 
+    print("  - Starting RDF Calculation (GPU Accelerated)...")
 
     # 2. Precompute Dynamic Intersection Volumes (CPU side to save VRAM)
     v_intersect_maps = {}
@@ -1075,82 +1076,7 @@ def calculate_glam_compressibility(rdf_df, num_levels):
     return compressibility_metrics
 
 
-# def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
-#     """Calculates anisotropic GLAM features using the gyration tensor."""
-#     # print("  - Starting Anisotropic GLAM analysis...")
-#     anisotropic_features = {}
-#     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
-    
-#     for alpha in range(num_levels):
-#         for beta in range(num_levels):
-            
-#             # --- FILL LOCATION 1: POPULATION CHECK ---
-#             # If not enough points to measure, set to 0.0 (Isotropic) and skip
-#             if len(coords[alpha]) == 0 or len(coords[beta]) < 10: 
-#                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
-#                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
-#                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
-#                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
-#                 continue
 
-#             num_ref_points = min(len(coords[alpha]), 50)
-#             # Safety: Ensure we don't sample more than exists
-#             if len(coords[alpha]) < num_ref_points:
-#                  ref_indices = np.arange(len(coords[alpha]))
-#             else:
-#                  ref_indices = np.random.choice(len(coords[alpha]), num_ref_points, replace=False)
-            
-#             avg_gyration_tensor = np.zeros((3, 3))
-#             valid_tensors = 0
-            
-#             for i in ref_indices:
-#                 ref_point = coords[alpha][i]
-#                 vectors = coords[beta] - ref_point
-#                 distances = np.linalg.norm(vectors, axis=1)
-#                 neighbors = vectors[distances < cutoff_radius]
-                
-#                 if len(neighbors) < 3: continue
-                
-#                 gyration_tensor = np.cov(neighbors, rowvar=False)
-#                 avg_gyration_tensor += gyration_tensor
-#                 valid_tensors += 1
-            
-#             # --- FILL LOCATION 2: VALID TENSOR CHECK ---
-#             if valid_tensors > 0:
-#                 avg_gyration_tensor /= valid_tensors
-#                 # Check for NaNs/Infs in the tensor before Eigendecomposition
-#                 if np.any(np.isnan(avg_gyration_tensor)) or np.any(np.isinf(avg_gyration_tensor)):
-#                      l1, l2, l3 = 0.0, 0.0, 0.0
-#                      anisotropy = 0.0
-#                 else:
-#                     try:
-#                         eigenvalues, _ = np.linalg.eigh(avg_gyration_tensor)
-#                         eigenvalues = np.sort(eigenvalues)[::-1]
-#                         l1, l2, l3 = eigenvalues
-                        
-#                         denom = (l1 + l2 + l3)**2
-#                         if denom > 1e-9:
-#                             anisotropy = 1 - 3 * (l1*l2 + l2*l3 + l3*l1) / denom
-#                         else:
-#                             anisotropy = 0.0
-#                     except np.linalg.LinAlgError:
-#                         l1, l2, l3 = 0.0, 0.0, 0.0
-#                         anisotropy = 0.0
-
-#                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = anisotropy
-#                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = l1
-#                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = l2
-#                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = l3
-            
-#             else:
-#                 # If we found reference points but NO valid neighbors within radius
-#                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
-#                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
-#                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
-#                 anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
-
-#     # print("  - Anisotropic GLAM analysis complete.")
-#     return anisotropic_features
 
 def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
     """
@@ -1978,47 +1904,7 @@ def calculate_nematic_order_per_gray_level(image_array, mask_array, quantized_im
     return nematic_features
 
 
-# def calculate_local_nematic_alignment(image_array, mask_array, cutoff_radius):
-#     """Calculates the average alignment of local directors."""
-#     print("  - Starting Local Nematic Alignment analysis...")
-#     roi_coords = np.argwhere(mask_array > 0)
-#     if len(roi_coords) < 50: return {}
 
-#     grad = np.array(np.gradient(image_array.astype(float)))
-#     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
-#     tree = cKDTree(roi_coords)
-#     num_ref_points = min(len(roi_coords), 200)
-#     ref_indices = np.random.choice(len(roi_coords), num_ref_points, replace=False)
-    
-#     local_directors = {}
-#     for i in ref_indices:
-#         ref_point = roi_coords[i]
-#         neighbor_indices = tree.query_ball_point(ref_point, r=cutoff_radius)
-#         if len(neighbor_indices) < 10: continue
-#         local_grad_vectors = grad_vectors[neighbor_indices]
-#         norms = np.linalg.norm(local_grad_vectors, axis=1)
-#         valid = norms > 1e-6
-#         if np.sum(valid) < 10: continue
-#         local_unit_vectors = local_grad_vectors[valid] / norms[valid, np.newaxis]
-#         Q_local = np.mean([np.outer(n, n) for n in local_unit_vectors], axis=0) - (1/3) * np.identity(3)
-#         eigenvalues, eigenvectors = np.linalg.eigh(Q_local)
-#         local_directors[tuple(ref_point)] = eigenvectors[:, np.argmax(eigenvalues)]
-
-#     if len(local_directors) < 2: return {}
-
-#     director_coords = np.array(list(local_directors.keys()))
-#     director_vectors = np.array(list(local_directors.values()))
-#     director_tree = cKDTree(director_coords)
-    
-#     alignments = []
-#     for i, coord in enumerate(director_coords):
-#         dist, idx = director_tree.query(coord, k=2)
-#         if len(idx) > 1:
-#             alignments.append(np.dot(director_vectors[i], director_vectors[idx[1]])**2)
-
-#     if not alignments: return {}
-#     print("  - Local Nematic Alignment analysis complete.")
-#     return {'GLAM.LocalNematic.Alignment': np.mean(alignments)}
 
 def calculate_local_nematic_alignment(image_array, mask_array, cutoff_radius):
     """
@@ -2219,83 +2105,6 @@ def _calculate_stress_features_cpu(image_array, mask_array):
     return stress_features
 
 
-# def calculate_orientational_correlation_length(image_array, mask_array, max_radius):
-#     """Calculates the Orientational Correlation Length from the g2(r) function.
-#        (Memory-efficient version)
-#     """
-#     print("  - Starting Orientational Correlation analysis...")
-#     if np.sum(mask_array) < 50: return {}
-#     grad = np.array(np.gradient(image_array.astype(float)))
-#     roi_coords = np.argwhere(mask_array > 0)
-#     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
-#     norms = np.linalg.norm(grad_vectors, axis=1)
-#     valid_indices = norms > 1e-6
-#     if np.sum(valid_indices) < 50: return {}
-#     coords, vectors = roi_coords[valid_indices], grad_vectors[valid_indices] / norms[valid_indices, np.newaxis]
-#     tree = cKDTree(coords)
-#     num_ref_points = min(len(coords), 500) # You can also reduce this 500 to e.g. 200
-#     ref_indices = np.random.choice(len(coords), num_ref_points, replace=False)
-
-#     # --- NEW: Pre-allocate bins ---
-#     # We will add to these bins instead of creating huge lists
-#     g2_r_bins = np.zeros(max_radius, dtype=np.float64)
-#     bin_counts = np.zeros(max_radius, dtype=np.int64)
-#     # ---
-
-#     for i in ref_indices:
-#         ref_point, ref_vector = coords[i], vectors[i]
-#         neighbor_indices = tree.query_ball_point(ref_point, r=max_radius)
-#         if len(neighbor_indices) < 2: continue
-        
-#         neighbor_coords = coords[neighbor_indices]
-#         neighbor_vectors = vectors[neighbor_indices]
-        
-#         distances = np.linalg.norm(neighbor_coords - ref_point, axis=1)
-#         valid_dist = distances > 1e-6
-#         if not np.any(valid_dist): continue
-        
-#         # Get distances and dot products for valid neighbors
-#         distances = distances[valid_dist]
-#         dot_products = np.dot(neighbor_vectors[valid_dist], ref_vector)
-#         p2_values = 0.5 * (3 * dot_products**2 - 1)
-        
-#         # --- NEW: Binning inside the loop ---
-#         # Get bin index (0 for r=1, 1 for r=2, etc.)
-#         bin_indices = np.floor(distances).astype(int) - 1
-        
-#         # Filter out any bins that are out of range (e.g., r=0 or r > max_radius)
-#         valid_bins = (bin_indices >= 0) & (bin_indices < max_radius)
-#         if not np.any(valid_bins): continue
-        
-#         bin_indices = bin_indices[valid_bins]
-#         p2_values = p2_values[valid_bins]
-        
-#         # Add values to their respective bins atomically
-#         # This is the memory-efficient equivalent of binned_statistic
-#         np.add.at(g2_r_bins, bin_indices, p2_values)
-#         np.add.at(bin_counts, bin_indices, 1)
-#         # ---
-        
-#     # Calculate the average g2(r) for bins that have data
-#     valid_g2_bins = bin_counts > 0
-#     g2_r = np.full(max_radius, np.nan)
-#     g2_r[valid_g2_bins] = g2_r_bins[valid_g2_bins] / bin_counts[valid_g2_bins]
-    
-#     r_vals = np.arange(1, max_radius + 1)
-#     valid_g2 = ~np.isnan(g2_r)
-    
-#     if np.sum(valid_g2) < 3: return {'GLAM.OrientationalCorrLength': np.nan}
-    
-#     def exp_decay(r, A, xi): return A * np.exp(-r / xi)
-#     try:
-#         # Fit the decay curve
-#         popt, _ = curve_fit(exp_decay, r_vals[valid_g2], g2_r[valid_g2], p0=[g2_r[valid_g2][0], 5.0], maxfev=5000)
-#         corr_length = popt[1] if popt[1] > 0 else np.nan
-#     except (RuntimeError, ValueError): 
-#         corr_length = np.nan
-        
-#     print("  - Orientational Correlation analysis complete.")
-#     return {'GLAM.OrientationalCorrLength': corr_length}
 
 def calculate_orientational_correlation_length(image_array, mask_array, max_radius):
     """

@@ -3,6 +3,17 @@ Release Notes
 
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
+GLAM 1.6.0 (Global Intensity Anchoring & Mapping Stabilization)
+---------------------------------------------------------------
+- October 2026
+- **Global Reference Intensity Normalization (Whole-Brain Anchoring):** 
+  * Decoupled the quantization bounding limits from the feature extraction ROI to support true biological baselines.
+  * *The Physics:* Classic radiomic normalization strictly within a tumor ROI artificially stretches low-variance, non-enhancing tumors across the entire discrete gray-level range. This forces the model to become hypersensitive to internal noise while blinding it to the macroscopic reality that the tissue is globally hypointense.
+  * *The Fix:* Introduced ``NormMaskIdentifiers`` to the configuration pipeline. When a reference mask (e.g., whole-brain or healthy parenchyma) is detected, the algorithm computes the global 1st and 99th percentiles to anchor the quantization space. Enhancing and non-enhancing habitats now accurately map to their true physiological bins, ensuring absolute mathematical stability for longitudinal growth kinetics and multi-center harmonizations.
+- **Mapping Engine Multiprocessing Stabilization:** 
+  * Resolved fatal GPU VRAM exhaustion (OOM) and CUDA context collisions during parallel 3D sliding-window generation. 
+  * *The Fix:* The mapping orchestrator now dynamically isolates multiprocessing workers from the GPU, routing local spherical patch calculations through the highly optimized CPU ``cKDTree`` backend. This safely parallelizes thousands of local windows across CPU cores without hardware deadlocks.
+  * *Technical Note:* Fully synchronized ``mapping.py`` with the GLAM 1.5.0 core engine update. Purged all legacy geometric correction dependencies, fixed spatial slicing offsets for boundary-truncated spherical windows, and implemented a mathematically exact volume-normalized null proxy (:math:`g_{\text{random}}(r) \equiv 1.0`) for local Configurational Disorder Index (CDI) mapping.
 
 GLAM 1.5.2 (New Features & Matrices)
 ---------------------------

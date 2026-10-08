@@ -47,6 +47,7 @@ from .core import (
     calculate_glam_wasserstein_distance,
     calculate_glam_assembly_coupling_matrix,
     calculate_glam_phenotypic_distance_matrix,
+    calculate_glam_pmf_wasserstein_matrix,
     calculate_cluster_features,
     calculate_profile_shape_features,
     calculate_glam_percolation,
@@ -185,6 +186,7 @@ def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured
     """
     Calculates all primary (matrix-forming) GLAM features by calling core functions.
     """
+    max_rdf_radius = get_config('MaxRdfRadius')
     anisotropy_cutoff_radius = get_config('AnisotropyCutoffRadius')
     
     spi_feats = calculate_glam_structural_pressure_index(rdf_structured_df, num_levels, level_counts, total_roi_voxels)
@@ -299,7 +301,7 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
         "LocalPackingFraction": ("GLAM_LocalPackingFraction_", None),
         "Wasserstein": ("GLAM_Wasserstein_", None),
         "AssemblyCoupling": ("GLAM_AssemblyCoupling_", None),
-        "PhenotypicDistance": ("GLAM_PhenotypicDistance_", None),        
+        "PhenotypicDistance": ("GLAM_PhenotypicDistance_", None), 
         "FractalDimension": ("GLAM_InterfaceFD_", "GLAM_VolumeFD_"),
         "MultifractalWidth": ("GLAM_InterfaceMultifractal_Width_", "GLAM_VolumeMultifractal_Width_"),
         "MultifractalAlpha0": ("GLAM_InterfaceMultifractal_Alpha0_", "GLAM_VolumeMultifractal_Alpha0_"),
@@ -600,7 +602,9 @@ def process_single_scan(prefix, paths, output_dir, config_path):
     labels_for_analysis = get_config('LabelsForAnalysis')
 
     mask_path = paths.get('mask')
+    norm_mask_path = paths.get('norm_mask')  # <--- NEW: Grab the norm mask path
     image_paths_dict = paths.get('images', {})
+    
     if not mask_path or not image_paths_dict:
         print(f"  - ERROR: Incomplete file set for {prefix}. Skipping.")
         return [], []
@@ -628,24 +632,37 @@ def process_single_scan(prefix, paths, output_dir, config_path):
         print(f"  - WARNING: Skipping scan {prefix}. Unknown mask format.")
         return [], []
 
-    # --- NEW: Precompute global intensity bounds (Whole Tumor) for Habitat consistency ---
+    # --- UPDATED: Precompute global intensity bounds (Whole Brain or Whole Tumor) ---
     method = get_config('QuantizationMethod').lower()
     global_bounds = {}
 
     if method == 'fixedcount':
-        print("  - Precomputing global intensity bounds (Whole Tumor) for consistent quantization...")
-        whole_tumor_mask_sitk = generate_binary_mask(multilabel_mask_sitk, 99)
-        wt_mask_array = sitk.GetArrayFromImage(whole_tumor_mask_sitk)
+        ref_mask_array = None
+        
+        # 1. Try to load the Normalization Mask first
+        if norm_mask_path:
+            print(f"  - Loading Normalization Mask for global intensity bounds: {os.path.basename(norm_mask_path)}")
+            try:
+                norm_mask_sitk = sitk.ReadImage(norm_mask_path, sitk.sitkUInt8)
+                ref_mask_array = sitk.GetArrayFromImage(norm_mask_sitk)
+            except Exception as e:
+                print(f"  - WARNING: Could not read normalization mask {norm_mask_path}: {e}. Falling back to Whole Tumor.")
+        
+        # 2. Fall back to Whole Tumor if no norm mask is provided (or if it failed to load)
+        if ref_mask_array is None:
+            print("  - Precomputing global intensity bounds (Whole Tumor) for consistent quantization...")
+            whole_tumor_mask_sitk = generate_binary_mask(multilabel_mask_sitk, 99)
+            ref_mask_array = sitk.GetArrayFromImage(whole_tumor_mask_sitk)
 
         for seq_name, image_path in image_paths_dict.items():
             try:
                 img_sitk = sitk.ReadImage(image_path, sitk.sitkFloat32)
                 img_arr = sitk.GetArrayFromImage(img_sitk)
-                wt_voxels = img_arr[wt_mask_array > 0]
+                ref_voxels = img_arr[ref_mask_array > 0]
 
-                if wt_voxels.size > 0:
-                    seq_min = np.percentile(wt_voxels, 1.0)
-                    seq_max = np.percentile(wt_voxels, 99.0)
+                if ref_voxels.size > 0:
+                    seq_min = np.percentile(ref_voxels, 1.0)
+                    seq_max = np.percentile(ref_voxels, 99.0)
                     global_bounds[seq_name] = (seq_min, seq_max)
                 else:
                     global_bounds[seq_name] = (None, None)
@@ -686,6 +703,7 @@ def process_single_scan(prefix, paths, output_dir, config_path):
                     meta_rows_list.append(meta_row)
             except Exception as e:
                 print(f"    - ERROR processing {output_prefix}: {e}")
+                import traceback
                 traceback.print_exc()
 
     return primary_rows_list, meta_rows_list

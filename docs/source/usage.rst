@@ -38,6 +38,9 @@ A typical configuration file is structured as follows:
     QuantizationMax = 1000
 
     [File_Naming]
+    # Intencity normalization mask identifiers. 
+    NormMaskIdentifiers = ["_brain.nii.gz", "_skullstripped.nii.gz"]
+
     # Segmentation file identifiers. 
     MaskIdentifiers = ["_seg.nii.gz", "-seg.nii.gz", "_mask.nii.gz", "-mask.nii.gz"]
 

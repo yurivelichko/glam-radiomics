@@ -8,41 +8,53 @@ import numpy as np
 
 def find_scan_mask_pairs(directory):
     """
-    Finds ONE mask and ALL associated image sequences in a directory.
-    Applies the single mask to all found image sequences.
+    Finds ONE analysis mask, ONE (optional) normalization mask, and ALL associated image sequences in a directory.
     Uses identifiers from the global config. Search is CASE-INSENSITIVE.
     """
 
     # --- Get params inside the function ---
     sequence_identifiers = get_config('SequenceIdentifiers')
     mask_identifiers = get_config('MaskIdentifiers')
+    norm_identifiers = get_config('NormMaskIdentifiers') # NEW
     # ---
 
     files = [f for f in os.listdir(directory) if f.endswith('.nii.gz')]
     
-    # --- NEW LOGIC: Find all masks and all images ---
     mask_paths = []
+    norm_mask_paths = [] # NEW
     image_paths = []
     
-    # Pre-lower the mask identifiers for efficiency
+    # Pre-lower the identifiers for efficiency
     mask_id_lower = [m.lower() for m in mask_identifiers]
+    norm_id_lower = [m.lower() for m in norm_identifiers] # NEW
 
     for f in files:
         f_lower = f.lower()
         is_mask = False
-        for identifier in mask_id_lower:
-            # Use endswith for masks like '_seg.nii.gz'
-            if f_lower.endswith(identifier): 
-                mask_paths.append(os.path.join(directory, f))
-                is_mask = True
+        is_norm_mask = False
+        
+        # 1. Check for Normalization Mask
+        for identifier in norm_id_lower:
+            if f_lower.endswith(identifier):
+                norm_mask_paths.append(os.path.join(directory, f))
+                is_norm_mask = True
                 break
-        if not is_mask:
+                
+        # 2. Check for Analysis Mask (if not a norm mask)
+        if not is_norm_mask:
+            for identifier in mask_id_lower:
+                if f_lower.endswith(identifier): 
+                    mask_paths.append(os.path.join(directory, f))
+                    is_mask = True
+                    break
+                    
+        # 3. Otherwise, it's a potential image sequence
+        if not is_mask and not is_norm_mask:
             image_paths.append(os.path.join(directory, f))
-    # ---
 
     # --- Handle findings ---
     if not mask_paths:
-        print(f"  > DEBUG: No mask file found in folder '{directory}'. Skipping.")
+        print(f"  > DEBUG: No analysis mask file found in folder '{directory}'. Skipping.")
         return {}
     
     if not image_paths:
@@ -50,24 +62,28 @@ def find_scan_mask_pairs(directory):
         return {}
         
     if len(mask_paths) > 1:
-        print(f"  > WARNING: Found {len(mask_paths)} masks in '{directory}'. Using the first one: {os.path.basename(mask_paths[0])}")
-    
+        print(f"  > WARNING: Found {len(mask_paths)} analysis masks in '{directory}'. Using the first one: {os.path.basename(mask_paths[0])}")
     mask_to_use = mask_paths[0]
+
+    # Handle Normalization Mask findings
+    norm_mask_to_use = None
+    if norm_mask_paths:
+        if len(norm_mask_paths) > 1:
+            print(f"  > WARNING: Found {len(norm_mask_paths)} norm masks in '{directory}'. Using the first one: {os.path.basename(norm_mask_paths[0])}")
+        norm_mask_to_use = norm_mask_paths[0]
     
     # --- Build the image dictionary ---
     images_dict = {}
     
-    # Create a list of (seq_name, identifier_str) tuples
     SEQUENCE_ID_CHECKS = []
     for seq_name, identifiers_list in sequence_identifiers.items():
         for identifier in identifiers_list:
-            SEQUENCE_ID_CHECKS.append((seq_name, identifier.lower())) # Pre-lower
+            SEQUENCE_ID_CHECKS.append((seq_name, identifier.lower())) 
 
     for img_path in image_paths:
         img_name_lower = os.path.basename(img_path).lower()
-        seq_name_found = 'Unknown' # Default
+        seq_name_found = 'Unknown' 
         
-        # Find the *best* (most specific/longest) match
         best_match_len = -1
         for seq_name, identifier in SEQUENCE_ID_CHECKS:
             if identifier in img_name_lower:
@@ -88,11 +104,11 @@ def find_scan_mask_pairs(directory):
         return {}
 
     # --- Create the final 'pairs' object ---
-    # The 'prefix' will be the patient folder name
     patient_prefix = os.path.basename(directory)
     
-    pairs = defaultdict(lambda: {'mask': None, 'images': {}})
+    pairs = defaultdict(lambda: {'mask': None, 'norm_mask': None, 'images': {}})
     pairs[patient_prefix]['mask'] = mask_to_use
+    pairs[patient_prefix]['norm_mask'] = norm_mask_to_use # NEW
     pairs[patient_prefix]['images'] = images_dict
     
     return pairs
