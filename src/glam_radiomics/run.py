@@ -47,7 +47,6 @@ from .core import (
     calculate_glam_wasserstein_distance,
     calculate_glam_assembly_coupling_matrix,
     calculate_glam_phenotypic_distance_matrix,
-    calculate_glam_pmf_wasserstein_matrix,
     calculate_cluster_features,
     calculate_profile_shape_features,
     calculate_glam_percolation,
