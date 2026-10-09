@@ -73,7 +73,16 @@ def load_config(config_path):
         parsed['MapWindowSizeCM'] = config.getfloat('Feature_Mapping', 'MapWindowSizeCM', fallback=2.0)
         parsed['MapMinWindowVoxels'] = config.getint('Feature_Mapping', 'MapMinWindowVoxels', fallback=100)
         parsed['MapFeatures'] = json.loads(config.get('Feature_Mapping', 'MapFeatures', fallback='["CoordNum"]'))
-        parsed['MapMetaMethod'] = config.get('Feature_Mapping', 'MapMetaMethod', fallback='Mean')
+
+        # In load_config, replace the existing MapMetaMethod line with:
+        map_meta_raw = config.get('Feature_Mapping', 'MapMetaMethod', fallback='["Mean"]')
+        try:
+            parsed['MapMetaMethod'] = json.loads(map_meta_raw)
+            if isinstance(parsed['MapMetaMethod'], str):
+                parsed['MapMetaMethod'] = [parsed['MapMetaMethod']]
+        except json.JSONDecodeError:
+            parsed['MapMetaMethod'] = [map_meta_raw.strip('"\'')]
+
         parsed['MapRDFMaxRadius'] = config.getint('Feature_Mapping', 'MapRDFMaxRadius', fallback=10)
         parsed['MapRDFSamplePoints'] = config.getint('Feature_Mapping', 'MapRDFSamplePoints', fallback=50)
 

@@ -67,118 +67,99 @@ from .utils import (
 # === HELPER FUNCTIONS ===
 # =============================================================================
 
-def perform_quantization(image_array, mask_array, method, num_levels, q_min=None, q_max=None, bin_width=None, global_min=None, global_max=None):
-    """
-    Prepares rescaled and quantized images for GLAM analysis.
-    Supports FixedCount (MRI) and FixedWidth (CT).
-    """
-    print(f"  - Starting GLAM data preparation (Quantization: {method})...")
-    roi_voxels = image_array[mask_array > 0]
-    if roi_voxels.size == 0:
-        print("  - Skipping: Mask is empty.")
+def perform_quantization(image_array, mask_array, method, num_levels,
+                         q_min=None, q_max=None, bin_width=None,
+                         global_min=None, global_max=None):
+    """Normalize the whole crop consistently; quantize only the ROI."""
+    image_array = np.asarray(image_array, dtype=np.float64)
+    roi = np.asarray(mask_array) > 0
+    if image_array.shape != roi.shape:
+        raise ValueError("Image/mask array shapes differ")
+    if not roi.any():
         return None
-
-    rescaled_image_array = image_array.copy()
-    quantized_image = np.zeros_like(image_array, dtype=np.int16)
-
+    if not np.isfinite(image_array).all():
+        raise ValueError("Nonfinite image intensities: clean input before extraction")
+    if not 1 <= num_levels <= 32767:
+        raise ValueError("NumGrayLevels must be in 1..32767 for int16 storage")
+    method = method.lower()
+    print(f"  - Starting GLAM data preparation (Quantization: {method})...")
     if method == 'fixedcount':
-            # --- Robust Percentile Clipping to ignore extreme outliers ---
-            # Use global Whole Tumor bounds if provided, otherwise compute locally
-            if global_min is not None and global_max is not None:
-                image_min = global_min
-                image_max = global_max
-            else:
-                image_min = np.percentile(roi_voxels, 1.0)
-                image_max = np.percentile(roi_voxels, 99.0)
-            
-            # Clip the extreme voxels to these new, biologically relevant bounds
-            clipped_voxels = np.clip(roi_voxels, image_min, image_max)
-
-            if (image_max - image_min) > 1e-6:
-                # 1. Normalize intensities purely to 0.0 - 1.0 based on the clipped range
-                normalized_voxels = (clipped_voxels - image_min) / (image_max - image_min)
-                rescaled_image_array[mask_array > 0] = normalized_voxels
-                
-                # 2. Direct quantization using the exact equation
-                q_vals = np.floor(normalized_voxels * num_levels).astype(np.int16)
-            else:
-                rescaled_image_array[mask_array > 0] = 0.0
-                q_vals = np.zeros_like(roi_voxels, dtype=np.int16)
-            
-            # Cap edge cases to prevent out-of-bounds mapping
-            q_vals[q_vals >= num_levels] = num_levels - 1
-            q_vals[q_vals < 0] = 0  # Safety net for the lower bounds
-            
-            quantized_image[mask_array > 0] = q_vals
-
+        if (global_min is None) != (global_max is None):
+            raise ValueError("Supply both global intensity bounds or neither")
+        if global_min is None:
+            image_min, image_max = np.percentile(image_array[roi], [1.0, 99.0])
+        else:
+            image_min, image_max = float(global_min), float(global_max)
+        if not np.isfinite([image_min, image_max]).all() or image_max < image_min:
+            raise ValueError("Invalid fixed-count intensity bounds")
+        if image_max - image_min > 1e-6:
+            rescaled_image_array = (
+                np.clip(image_array, image_min, image_max) - image_min
+            ) / (image_max - image_min)
+        else:
+            rescaled_image_array = np.zeros_like(image_array)
+        q_vals = np.floor(rescaled_image_array[roi] * num_levels)
     elif method == 'fixedwidth':
-        # 1. Clip physical intensities to specified bounds
-        clipped_voxels = np.clip(roi_voxels, q_min, q_max)
-        
-        # 2. Shift bounds to zero and divide by bin width
-        q_vals = np.floor((clipped_voxels - q_min) / bin_width).astype(np.int16)
-        
-        # 3. Handle edge cases (the exact max bound will land one index out of bounds)
-        q_vals[q_vals >= num_levels] = num_levels - 1
-        q_vals[q_vals < 0] = 0
-        
-        quantized_image[mask_array > 0] = q_vals
-        
+        if q_min is None or q_max is None or bin_width is None:
+            raise ValueError("Fixed-width quantization requires bounds and bin width")
+        if not np.isfinite([q_min, q_max, bin_width]).all() or bin_width <= 0 or q_max <= q_min:
+            raise ValueError("Invalid fixed-width bounds/bin width")
+        expected_levels = int(np.ceil((q_max - q_min) / bin_width))
+        if num_levels != expected_levels:
+            raise ValueError("NumGrayLevels does not match fixed-width bounds")
+        # Preserve physical intensity units, with clipping applied to the whole crop.
+        rescaled_image_array = np.clip(image_array, q_min, q_max)
+        q_vals = np.floor((rescaled_image_array[roi] - q_min) / bin_width)
     else:
         raise ValueError(f"Unknown QuantizationMethod: {method}")
-
+    q_vals = np.clip(q_vals, 0, num_levels - 1).astype(np.int16)
+    quantized_image = np.zeros(image_array.shape, dtype=np.int16)
+    quantized_image[roi] = q_vals
     structured_glam_image = np.full(image_array.shape, -1, dtype=np.int16)
-    structured_glam_image[mask_array > 0] = quantized_image[mask_array > 0]
-
-    roi_quantized_voxels = structured_glam_image[mask_array > 0]
-    level_counts = [np.sum(roi_quantized_voxels == i) for i in range(num_levels)]
-    total_roi_voxels = roi_quantized_voxels.size
-
+    structured_glam_image[roi] = q_vals
     return {
         "rescaled_image_array": rescaled_image_array,
         "quantized_image": quantized_image,
         "structured_glam_image": structured_glam_image,
-        "roi_quantized_voxels": roi_quantized_voxels,
-        "level_counts": level_counts,
-        "total_roi_voxels": total_roi_voxels
+        "roi_quantized_voxels": q_vals,
+        "level_counts": np.bincount(q_vals, minlength=num_levels).tolist(),
+        "total_roi_voxels": int(q_vals.size),
     }
+
 
 def calculate_glam_rdfs(structured_glam_image, roi_quantized_voxels, num_levels,
                         max_radius, level_counts, total_roi_voxels):
-    """
-    Calculates and returns the structured and averaged random RDFs (as DataFrames).
-    """
-    num_randomisations = get_config('NumRandomisations')
-    rdf_sample_points = get_config('RdfSamplePoints')
+    """Use identical ROI geometry and centered lattice shells for both RDFs."""
+    n_random = int(get_config('NumRandomisations'))
+    samples = int(get_config('RdfSamplePoints'))
+    if n_random < 1:
+        raise ValueError("NumRandomisations must be at least 1")
+    roi = structured_glam_image >= 0
+    if int(roi.sum()) != total_roi_voxels:
+        raise ValueError("RDF ROI count mismatch")
+    print("  - Calculating boundary-corrected structured RDF...")
+    structured = calculate_rdf_3d(
+        structured_glam_image, num_levels, max_radius, list(level_counts),
+        total_roi_voxels, n_random, samples, sample_mask=roi)
+    baseline_frames = []
+    for i in range(n_random):
+        shuffled = np.random.permutation(roi_quantized_voxels)
+        randomized = np.full(structured_glam_image.shape, -1, dtype=np.int16)
+        randomized[roi] = shuffled
+        frame = calculate_rdf_3d(
+            randomized, num_levels, max_radius, list(level_counts),
+            total_roi_voxels, n_random, samples, sample_mask=roi)
+        if frame is None or frame.empty:
+            raise RuntimeError(f"Empty randomized RDF at replicate {i + 1}")
+        if not np.array_equal(frame['r'].values, structured['r'].values):
+            raise RuntimeError("Structured/random RDF radii differ")
+        baseline_frames.append(frame)
+    baseline = structured.copy()
+    g_cols = [c for c in structured.columns if c.startswith('g_')]
+    baseline[g_cols] = np.mean(
+        np.stack([f[g_cols].to_numpy() for f in baseline_frames]), axis=0)
+    return structured, baseline
 
-    print("  - Calculating structured RDF...")
-    rdf_structured_df = calculate_rdf_3d( 
-        structured_glam_image, num_levels, max_radius, level_counts, total_roi_voxels,
-        num_randomisations, rdf_sample_points 
-    )
-
-    print(f"  - Performing {num_randomisations} randomizations for stable RDF baseline...")
-    all_random_rdfs = []
-    mask_indices = structured_glam_image > -1
-
-    for i in range(num_randomisations):
-        if (i+1) % 2 == 0 or num_randomisations <= 2:
-             print(f"    - Randomization {i+1}/{num_randomisations}...")
-
-        shuffled_voxels = roi_quantized_voxels.copy()
-        np.random.shuffle(shuffled_voxels)
-
-        randomized_glam_image = np.full(structured_glam_image.shape, -1, dtype=np.int16)
-        randomized_glam_image[mask_indices] = shuffled_voxels
-
-        all_random_rdfs.append(calculate_rdf_3d( 
-            randomized_glam_image, num_levels, max_radius, level_counts, total_roi_voxels,
-            num_randomisations, rdf_sample_points 
-        ))
-
-    rdf_random_df = pd.concat(filter(lambda df: not df.empty, all_random_rdfs)).groupby(level=0).mean() if all_random_rdfs else pd.DataFrame()
-
-    return rdf_structured_df, rdf_random_df
 
 def calculate_primary_glam_features(rdf_structured_df, rdf_random_df, structured_glam_image,
                                     num_levels, level_counts, total_roi_voxels, spacing): 
@@ -729,6 +710,7 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
         # --- BOUNDING BOX CROP ---
         from scipy import ndimage
         slices = ndimage.find_objects((mask_array > 0).astype(int))
+        crop_slices = None
         if slices:
             z_s, y_s, x_s = slices[0]
             pad = 2
@@ -736,8 +718,10 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
             y_start, y_end = max(0, y_s.start - pad), min(image_array.shape[1], y_s.stop + pad)
             x_start, x_end = max(0, x_s.start - pad), min(image_array.shape[2], x_s.stop + pad)
             
-            image_array = image_array[z_start:z_end, y_start:y_end, x_start:x_end]
-            mask_array = mask_array[z_start:z_end, y_start:y_end, x_start:x_end]
+            crop_slices = (slice(z_start, z_end), slice(y_start, y_end), slice(x_start, x_end))
+            
+            image_array = image_array[crop_slices]
+            mask_array = mask_array[crop_slices]
         # ----------------------------------
 
         # Pass the new arguments here
@@ -847,12 +831,28 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
     # --- 5. Feature Mapping ---
     if get_config('EnableMapping'):
         try:
+            full_mask_array = sitk.GetArrayFromImage(binary_mask_sitk)
+            cropped_quantized = prep_data['quantized_image']
+            
+            if crop_slices is None:
+                mapping_quantized = cropped_quantized
+            else:
+                mapping_quantized = np.full(full_mask_array.shape, -1, dtype=np.int16)
+                mapping_quantized[crop_slices] = cropped_quantized
+                
+            if mapping_quantized.shape != full_mask_array.shape:
+                raise ValueError(
+                    f"Mapping shape mismatch: quantized={mapping_quantized.shape}, mask={full_mask_array.shape}"
+                )
+                
             mapping.generate_feature_maps(
-                image_sitk, binary_mask_sitk, prep_data['quantized_image'],
+                image_sitk, binary_mask_sitk, mapping_quantized,
                 num_gray_levels, prefix, output_dir, config_path
             )
-        except Exception as e:
-            print(f"  - ERROR: Feature Mapping failed: {e}")
+        except Exception:
+            print("  - ERROR: Feature Mapping failed:")
+            import traceback
+            traceback.print_exc()
 
     return primary_feature_row, meta_feature_row
 

@@ -13,6 +13,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from skimage import measure
 import scipy.integrate
+import scipy.signal
 
 # Import config access
 from .config import get_config
@@ -682,11 +683,14 @@ def calculate_shape_features_3d(mask_sitk, prefix):
 # =============================================================================
 
 def get_shell_kernel(r):
-    """Creates a 3D boolean kernel for a radial shell."""
-    size = int(np.ceil(r))
+    """Centered lattice shell: r-0.5 <= distance < r+0.5, excluding self."""
+    if int(r) != r or r < 1:
+        raise ValueError("Shell radius must be a positive integer")
+    size = int(np.ceil(r + 0.5))
     z, y, x = np.ogrid[-size:size+1, -size:size+1, -size:size+1]
-    distances = np.sqrt(z**2 + y**2 + x**2)
-    return (np.floor(distances) == r).astype(float)
+    distance = np.sqrt(z*z + y*y + x*x)
+    return ((distance >= r - 0.5) & (distance < r + 0.5)).astype(float)
+
 
 def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts, 
                      total_roi_voxels, num_randomisations, rdf_sample_points, 
@@ -695,7 +699,24 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
     Calculates the boundary-corrected Radial Distribution Function (RDF) for a 3D image.
     Uses pure cuBLAS matrix math with dynamic intersection-volume normalization.
     """
-    
+    image_3d = np.asarray(image_3d)
+    if image_3d.ndim != 3 or max_radius < 1 or rdf_sample_points < 1:
+        raise ValueError("RDF requires 3D input, positive radius and sample count")
+    if sample_mask is None:
+        sample_mask = image_3d >= 0
+    else:
+        sample_mask = np.asarray(sample_mask) > 0
+    if sample_mask.shape != image_3d.shape:
+        raise ValueError("RDF mask/image shape mismatch")
+    values = image_3d[sample_mask]
+    if values.size == 0 or np.any(values < 0) or np.any(values >= num_levels):
+        raise ValueError("Empty RDF ROI or invalid gray levels")
+    if not np.all(values == np.floor(values)):
+        raise ValueError("RDF gray levels must be integers")
+    if values.size != total_roi_voxels:
+        raise ValueError("RDF total_roi_voxels differs from actual ROI size")
+    level_counts = np.bincount(values.astype(int), minlength=num_levels).tolist()
+
     # 1. Hardware Check & CPU Fallback
     if not HAS_GPU:
         print("  > DEBUG: No GPU detected. Falling back to CPU cKDTree RDF calculation.")
@@ -713,10 +734,10 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         mask_float = (sample_mask > 0).astype(float)
         for r in range(1, max_radius + 1):
             kernel = get_shell_kernel(r)
-            v_intersect_maps[r] = ndimage.convolve(mask_float, kernel, mode='constant', cval=0.0)
+            v_intersect_maps[r] = np.maximum(0.0, np.rint(scipy.signal.fftconvolve(mask_float, kernel, mode='same')))
     else:
         # Ideal volumes if no mask is provided
-        v_ideal = {r: (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3) for r in range(1, max_radius + 1)}
+        v_ideal = {r: float(get_shell_kernel(r).sum()) for r in range(1, max_radius + 1)}
 
     # 3. Define ALL potential neighbors (The "System") restricted to mask
     coords = []
@@ -728,19 +749,19 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
         coords.append(np.argwhere(mask_i))
         # Update level counts to reflect ONLY masked voxels
         level_counts[i] = len(coords[-1]) 
-    
+
     coords_gpu = [cp.array(c, dtype=cp.float32) if len(c) > 0 else None for c in coords]
     rdf_data = defaultdict(lambda: defaultdict(float))
-    
+
     for alpha in range(num_levels):
         if level_counts[alpha] == 0: continue
-        
+
         coords_alpha = coords[alpha]
         if len(coords_alpha) == 0: continue
 
         num_ref_points = min(len(coords_alpha), rdf_sample_points)
         if num_ref_points == 0: continue
-        
+
         ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
         ref_points = coords_alpha[ref_indices]
         ref_points_gpu = cp.array(ref_points, dtype=cp.float32)
@@ -756,11 +777,11 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
             if target_points_gpu is None: continue
 
             num_targets = target_points_gpu.shape[0]
-            bytes_per_ref = num_targets * 8
-            
+            bytes_per_ref = num_targets * 40
+
             batch_size = int(safe_vram_bytes // bytes_per_ref)
             batch_size = max(1, min(batch_size, num_ref_points))
-            
+
             # Track accumulated density and valid points per shell
             accumulated_density = cp.zeros(max_radius + 1, dtype=cp.float32)
             valid_point_counts = cp.zeros(max_radius + 1, dtype=cp.float32)
@@ -769,29 +790,29 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
 
             for i in range(0, num_ref_points, batch_size):
                 batch_refs = ref_points_gpu[i : i + batch_size]
-                
+
                 A_sq = cp.sum(batch_refs**2, axis=1, keepdims=True)
                 AB = cp.matmul(batch_refs, target_points_gpu.T)
-                
+
                 dist_sq = A_sq + B_sq - 2.0 * AB
                 dists = cp.sqrt(cp.maximum(dist_sq, 0.0)) 
-                
+
                 if alpha == beta:
-                    valid_mask = (dists > 1e-6) & (dists <= max_radius + 0.99)
+                    valid_mask = (dists > 1e-6) & (dists < max_radius + 0.5)
                 else:
-                    valid_mask = (dists <= max_radius + 0.99)
-                
-                bins = cp.floor(dists).astype(cp.int32)
-                
+                    valid_mask = (dists < max_radius + 0.5)
+
+                bins = cp.floor(dists + 0.5).astype(cp.int32)
+
                 # Bin row-by-row to maintain per-reference point counts
                 for r in range(1, max_radius + 1):
                     # sum over targets for each reference point
                     counts_r = cp.sum((bins == r) & valid_mask, axis=1) 
-                    
+
                     if sample_mask is not None:
                         v_batch = v_shell_gpu[r][i : i + batch_size]
                         valid_v = v_batch > 0
-                        
+
                         if cp.any(valid_v):
                             local_densities = counts_r[valid_v] / v_batch[valid_v]
                             accumulated_density[r] += cp.sum(local_densities)
@@ -799,13 +820,13 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
                     else:
                         accumulated_density[r] += cp.sum(counts_r) / v_ideal[r]
                         valid_point_counts[r] += counts_r.shape[0]
-            
+
             acc_den_cpu = accumulated_density.get()
             vpc_cpu = valid_point_counts.get()
-            
+
             rho_beta = level_counts[beta] / total_roi_voxels
             if rho_beta == 0: continue
-            
+
             for r in range(1, max_radius + 1):
                 if vpc_cpu[r] > 0:
                     rdf_data[(alpha, beta)][r] = (acc_den_cpu[r] / vpc_cpu[r]) / rho_beta
@@ -822,18 +843,36 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
 
     return pd.DataFrame(df_data)
 
+
 def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask=None):
     """
     Fallback CPU function using scipy cKDTree and boundary correction.
     """
+    image_3d = np.asarray(image_3d)
+    if image_3d.ndim != 3 or max_radius < 1 or rdf_sample_points < 1:
+        raise ValueError("RDF requires 3D input, positive radius and sample count")
+    if sample_mask is None:
+        sample_mask = image_3d >= 0
+    else:
+        sample_mask = np.asarray(sample_mask) > 0
+    if sample_mask.shape != image_3d.shape:
+        raise ValueError("RDF mask/image shape mismatch")
+    values = image_3d[sample_mask]
+    if values.size == 0 or np.any(values < 0) or np.any(values >= num_levels):
+        raise ValueError("Empty RDF ROI or invalid gray levels")
+    if not np.all(values == np.floor(values)):
+        raise ValueError("RDF gray levels must be integers")
+    if values.size != total_roi_voxels:
+        raise ValueError("RDF total_roi_voxels differs from actual ROI size")
+    level_counts = np.bincount(values.astype(int), minlength=num_levels).tolist()
     v_intersect_maps = {}
     if sample_mask is not None:
         mask_float = (sample_mask > 0).astype(float)
         for r in range(1, max_radius + 1):
             kernel = get_shell_kernel(r)
-            v_intersect_maps[r] = ndimage.convolve(mask_float, kernel, mode='constant', cval=0.0)
+            v_intersect_maps[r] = np.maximum(0.0, np.rint(scipy.signal.fftconvolve(mask_float, kernel, mode='same')))
     else:
-        v_ideal = {r: (4/3) * np.pi * ((r + 0.5)**3 - (r - 0.5)**3) for r in range(1, max_radius + 1)}
+        v_ideal = {r: float(get_shell_kernel(r).sum()) for r in range(1, max_radius + 1)}
 
     coords = []
     for i in range(num_levels):
@@ -848,13 +887,13 @@ def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_
 
     for alpha in range(num_levels):
         if level_counts[alpha] == 0: continue
-        
+
         coords_alpha = coords[alpha]
         if len(coords_alpha) == 0: continue
 
         num_ref_points = min(len(coords_alpha), rdf_sample_points)
         if num_ref_points == 0: continue
-        
+
         ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
         ref_points = coords_alpha[ref_indices]
 
@@ -863,28 +902,28 @@ def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_
 
         for beta in range(num_levels):
             if level_counts[beta] == 0: continue
-            
+
             target_points = coords[beta]
             tree = cKDTree(target_points)
-            
-            neighbors = tree.query_ball_point(ref_points, max_radius + 0.99)
-            
+
+            neighbors = tree.query_ball_point(ref_points, max_radius + 0.5)
+
             accumulated_density = np.zeros(max_radius + 1)
             valid_point_counts = np.zeros(max_radius + 1)
-            
+
             for i, n_indices in enumerate(neighbors):
                 counts_i = np.zeros(max_radius + 1)
-                
+
                 for j in n_indices:
                     if alpha == beta and np.array_equal(ref_points[i], target_points[j]):
                         continue
-                        
+
                     dist = np.linalg.norm(ref_points[i] - target_points[j])
-                    if dist <= max_radius + 0.99:
-                        r_bin = int(np.floor(dist))
+                    if dist < max_radius + 0.5:
+                        r_bin = int(np.floor(dist + 0.5))
                         if 1 <= r_bin <= max_radius:
                             counts_i[r_bin] += 1
-                
+
                 for r in range(1, max_radius + 1):
                     if sample_mask is not None:
                         v = v_shell_alpha[r][i]
@@ -894,10 +933,10 @@ def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_
                     else:
                         accumulated_density[r] += counts_i[r] / v_ideal[r]
                         valid_point_counts[r] += 1
-            
+
             rho_beta = level_counts[beta] / total_roi_voxels
             if rho_beta == 0: continue
-            
+
             for r in range(1, max_radius + 1):
                 if valid_point_counts[r] > 0:
                     rdf_data[(alpha, beta)][r] = (accumulated_density[r] / valid_point_counts[r]) / rho_beta
@@ -911,6 +950,7 @@ def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_
         df_data.append(row)
 
     return pd.DataFrame(df_data)
+
 
 
 
@@ -1010,7 +1050,7 @@ def calculate_glam_coordination_number(rdf_df, num_levels, level_counts, total_r
             if len(g_r_raw) > savgol_window:
                 g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
             else:
-                g_r = g_r_raw 
+                g_r = g_r_raw.copy() 
 
             rho_beta = level_counts[beta] / total_roi_voxels if total_roi_voxels > 0 else 0
             
@@ -1742,7 +1782,7 @@ def calculate_glam_structural_pressure_index(rdf_df, num_levels, level_counts, t
                 if len(g_r_raw) > savgol_window:
                     g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
                 else:
-                    g_r = g_r_raw
+                    g_r = g_r_raw.copy()
                 
                 g_r[g_r <= 1e-9] = 1e-9 
                 
@@ -1816,8 +1856,8 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
 
                 if r_min_idx == 0: r_min_idx = 1 
 
-                g_s_shell = g_struct[:r_min_idx]
-                g_r_shell = g_rand[:r_min_idx]
+                g_s_shell = g_struct[:r_min_idx].copy()
+                g_r_shell = g_rand[:r_min_idx].copy()
 
                 g_s_shell[g_s_shell <= 1e-9] = 1e-9
                 g_r_shell[g_r_shell <= 1e-9] = 1e-9
@@ -3008,7 +3048,7 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
             processed_sizes.append(eps)
 
             box_indices = cp.floor(pixels / eps).astype(cp.int32)
-            
+
             # Fast GPU flat-indexing for unique counting
             max_y = (shape_y // eps) + 2
             max_x = (shape_x // eps) + 2
@@ -3027,45 +3067,7 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
         if len(processed_sizes) < 3:
              return {f"D_q_{q}": 0.0 for q in q_values_cpu} | {"Width": 0.0, "Alpha_0": 0.0}
 
-        x_all = np.log(np.array(processed_sizes))
-        tau_q = {}
-
-        for q in q_values_cpu:
-            z_values = np.array(Z[q])
-            mask = (z_values > 1e-20) & np.isfinite(z_values)
-
-            if np.sum(mask) < 3:
-                tau_q[q] = 0.0
-                results[f"D_q_{q}"] = 0.0
-                continue
-
-            y_clean = np.log(z_values[mask])
-            x_clean = x_all[mask]
-
-            slope, _, _, _, _ = stats.linregress(x_clean, y_clean)
-            tau_q[q] = slope
-
-            if q == 1:
-                results[f"D_q_{q}"] = slope
-            elif q != 1:
-                results[f"D_q_{q}"] = slope / (q - 1)
-
-        alphas = []
-        q_sorted = sorted(q_values_cpu)
-        for k in range(len(q_sorted)-1):
-            q1, q2 = q_sorted[k], q_sorted[k+1]
-            t1, t2 = tau_q[q1], tau_q[q2]
-            if (q2 - q1) != 0:
-                alphas.append((t2 - t1) / (q2 - q1))
-
-        if alphas:
-            results["Width"] = max(alphas) - min(alphas)
-            results["Alpha_0"] = np.mean(alphas)
-        else:
-            results["Width"] = 0.0
-            results["Alpha_0"] = 0.0
-
-        return results
+        return _fit_multifractal_moments(processed_sizes, Z, q_values_cpu)
 
     # 1. Volume
     for i in range(num_levels):
@@ -3073,6 +3075,7 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
         multifractal_features[f'GLAM_VolumeMultifractal_Width_{i}'] = mf_res["Width"]
         multifractal_features[f'GLAM_VolumeMultifractal_Alpha0_{i}'] = mf_res["Alpha_0"]
         multifractal_features[f'GLAM_VolumeMultifractal_D2_{i}'] = mf_res.get("D_q_2", 0.0)
+        multifractal_features[f'GLAM_VolumeMultifractal_D1_{i}'] = mf_res.get("D_q_1", 0.0)
 
     # 2. Interface
     for i in range(num_levels):
@@ -3110,12 +3113,13 @@ def calculate_glam_multifractal_spectrum(image_3d, num_levels):
     cp.get_default_memory_pool().free_all_blocks()
     return multifractal_features
 
+
 def _calculate_glam_multifractal_spectrum_cpu(image_3d, num_levels):
     """Fallback CPU function for Multifractal Spectrum."""
     multifractal_features = {}
     q_values = np.array([-5, -2, 0, 1, 2, 5]) 
     box_sizes = [2, 3, 4, 6, 8, 12, 16]
-    
+
     def get_multifractal_spectrum(binary_mask):
         if np.sum(binary_mask) < 50: 
             return {f"D_q_{q}": 0.0 for q in q_values} | {"Width": 0.0, "Alpha_0": 0.0}
@@ -3139,37 +3143,8 @@ def _calculate_glam_multifractal_spectrum_cpu(image_3d, num_levels):
 
         if len(processed_sizes) < 3:
              return {f"D_q_{q}": 0.0 for q in q_values} | {"Width": 0.0, "Alpha_0": 0.0}
-             
-        x_all = np.log(np.array(processed_sizes))
-        tau_q = {}
-        for q in q_values:
-            z_values = np.array(Z[q])
-            mask = (z_values > 1e-20) & np.isfinite(z_values)
-            if np.sum(mask) < 3:
-                tau_q[q] = 0.0
-                results[f"D_q_{q}"] = 0.0
-                continue
-            y_clean = np.log(z_values[mask])
-            x_clean = x_all[mask]
-            slope, _, _, _, _ = stats.linregress(x_clean, y_clean)
-            tau_q[q] = slope
-            if q == 1: results[f"D_q_{q}"] = slope 
-            elif q != 1: results[f"D_q_{q}"] = slope / (q - 1)
-        
-        alphas = []
-        q_sorted = sorted(q_values)
-        for i in range(len(q_sorted)-1):
-            q1, q2 = q_sorted[i], q_sorted[i+1]
-            t1, t2 = tau_q[q1], tau_q[q2]
-            if (q2 - q1) != 0: alphas.append((t2 - t1) / (q2 - q1))
-            
-        if alphas:
-            results["Width"] = max(alphas) - min(alphas)
-            results["Alpha_0"] = np.mean(alphas)
-        else:
-            results["Width"], results["Alpha_0"] = 0.0, 0.0
-            
-        return results
+
+        return _fit_multifractal_moments(processed_sizes, Z, q_values)
 
     for i in range(num_levels):
         binary_image = (image_3d == i)
@@ -3177,6 +3152,7 @@ def _calculate_glam_multifractal_spectrum_cpu(image_3d, num_levels):
         multifractal_features[f'GLAM_VolumeMultifractal_Width_{i}'] = mf_res["Width"]
         multifractal_features[f'GLAM_VolumeMultifractal_Alpha0_{i}'] = mf_res["Alpha_0"]
         multifractal_features[f'GLAM_VolumeMultifractal_D2_{i}'] = mf_res.get("D_q_2", 0.0)
+        multifractal_features[f'GLAM_VolumeMultifractal_D1_{i}'] = mf_res.get("D_q_1", 0.0)
 
     for i in range(num_levels):
         for j in range(num_levels):
@@ -3192,12 +3168,13 @@ def _calculate_glam_multifractal_spectrum_cpu(image_3d, num_levels):
                 else:
                     mf_res = get_multifractal_spectrum(interface)
                     val_width, val_alpha, val_d2 = mf_res["Width"], mf_res["Alpha_0"], mf_res.get("D_q_2", 0.0)
-            
+
             multifractal_features[f'GLAM_InterfaceMultifractal_Width_{i}_{j}'] = val_width
             multifractal_features[f'GLAM_InterfaceMultifractal_Alpha0_{i}_{j}'] = val_alpha
             multifractal_features[f'GLAM_InterfaceMultifractal_D2_{i}_{j}'] = val_d2
 
     return multifractal_features
+
 
 
 def calculate_glam_shape_matrices(structured_image, num_levels, spacing):
@@ -3758,7 +3735,7 @@ def calculate_glam_local_packing_fraction(rdf_df, num_levels, level_counts, tota
             if len(g_r_raw) > savgol_window:
                 g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
             else:
-                g_r = g_r_raw 
+                g_r = g_r_raw.copy() 
 
             rho_beta = level_counts[beta] / total_roi_voxels if total_roi_voxels > 0 else 0
 
@@ -3923,3 +3900,33 @@ def calculate_glam_local_packing_fraction(rdf_df, num_levels, level_counts, tota
 #                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = np.nan
                 
 #     return js_features
+
+
+def _fit_multifractal_moments(processed_sizes, Z, q_values):
+    """Fit D1 from sum(p log p); normalized mass has tau(1)=0, not D1."""
+    x = np.log(np.asarray(processed_sizes, dtype=float))
+    result, tau = {}, {}
+    for q in q_values:
+        z = np.asarray(Z[q], dtype=float)
+        if q == 1:
+            valid = np.isfinite(z) & np.isfinite(x)
+            result[f"D_q_{q}"] = (
+                float(stats.linregress(x[valid], z[valid]).slope)
+                if valid.sum() >= 3 else np.nan)
+            tau[q] = 0.0
+        else:
+            valid = (z > 0) & np.isfinite(z) & np.isfinite(x)
+            slope = (float(stats.linregress(x[valid], np.log(z[valid])).slope)
+                     if valid.sum() >= 3 else np.nan)
+            tau[q] = slope
+            result[f"D_q_{q}"] = slope / (q - 1)
+    qs = sorted(q_values)
+    alphas = [(tau[b] - tau[a]) / (b - a) for a, b in zip(qs[:-1], qs[1:])]
+    if alphas and np.isfinite(alphas).all():
+        result["Width"] = float(np.ptp(alphas))
+        # Preserve the legacy summary definition; this is mean interval alpha,
+        # not a newly introduced estimate of alpha(q=0).
+        result["Alpha_0"] = float(np.mean(alphas))
+    else:
+        result["Width"] = result["Alpha_0"] = np.nan
+    return result

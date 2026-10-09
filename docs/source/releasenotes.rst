@@ -3,6 +3,25 @@ Release Notes
 
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
+GLAM 1.6.4 (Core Physics & Boundary Continuity Engine Update)
+-------------------------------------------------------------
+- October 2026
+- **Global RDF Boundary Correction:**
+  * Fixed an oversight where global structured and randomized Radial Distribution Function (RDF) calls omitted the tumor ROI mask, causing them to fall back to ideal shell volumes.
+  * *The Fix:* The exact tumor footprint is now explicitly passed as the sample mask to all global RDF calls, fully activating dynamic intersection-volume normalization for the entire macroscopic lesion.
+- **Continuous Intensity Scaling (Gradient Correction):**
+  * Eliminated an artificial intensity discontinuity at the tumor boundary that contaminated gradient and Laplacian-based features (such as Nematic Order, Stress, and Orientational Correlation).
+  * *The Fix:* The FixedCount quantization protocol now scales and clips the entire cropped image array prior to masking, preserving smooth, biologically accurate intensity gradients across the invasive margin.
+- **Unified RDF Shell Geometry:**
+  * Reconciled a geometric mismatch where neighbor counts used forward-shifted boundaries (`[r, r+1)`) while the normalization engine used centered boundaries (`[r-0.5, r+0.5)`). 
+  * *The Fix:* All spatial binning, neighbor distances, and analytical ideal volume calculations have been strictly unified to the centered lattice shell convention, guaranteeing mathematically exact density estimates.
+- **Degenerate Local CDI Resolution:**
+  * Replaced the localized Configurational Disorder Index (CDI) all-ones proxy ($g_{\text{random}}(r) \equiv 1.0$), which was algebraically degenerate and forced the disorder map to evaluate to 1.0.
+  * *The Fix:* Implemented genuine spatial label permutation strictly within the local sliding window. To guarantee multiprocessing stability, the random permutations utilize deterministic, node-local seeding (`np.random.SeedSequence([42, z, y, x])`), ensuring that CPU worker scheduling does not alter the generated maps.
+- **Multifractal Spectrum (q=1) Restoration:**
+  * Fixed a bug in the Multifractal Spectrum where the Shannon entropy ($q=1$) was erroneously subjected to a strictly positive log filter, destroying the inherently negative entropy values and corrupting the resulting spectrum width.
+  * *The Fix:* The partition function for the $q=1$ moment is now handled as an isolated case, bypassing the log filter and preserving the exact thermodynamic definition of the generalized dimensions.
+
 GLAM 1.6.2 (Global Intensity Anchoring & Mapping Stabilization)
 ---------------------------------------------------------------
 - October 2026
