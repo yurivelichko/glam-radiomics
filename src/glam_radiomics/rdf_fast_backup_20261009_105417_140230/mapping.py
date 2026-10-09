@@ -61,7 +61,7 @@ def _local_random_rdf(patch, sample_mask, levels, radius, counts, total, samples
     for _ in range(repeats):
         shuffled = np.full(patch.shape, -1, dtype=np.int16)
         shuffled[roi] = np.random.permutation(values)
-        frame = _fast_calculate_rdf_3d(
+        frame = core.calculate_rdf_3d(
             shuffled, levels, radius, list(counts), total, 1, samples,
             sample_mask=sample_mask)
         if frame is None or frame.empty:
@@ -101,7 +101,7 @@ def _process_single_voxel_worker(coords_z_y_x):
         # Node-local seed makes CPU maps independent of scheduling/worker count.
         seed = np.random.SeedSequence([42,z,y,x])
         np.random.seed(int(seed.generate_state(1)[0]))
-        rdf = _fast_calculate_rdf_3d(patch,levels,s['map_max_radius'],list(counts),
+        rdf = core.calculate_rdf_3d(patch,levels,s['map_max_radius'],list(counts),
                                   total,1,s['map_rdf_samples'],sample_mask=sample_mask)
         if rdf is None or rdf.empty:
             return z,y,x,None
@@ -204,6 +204,3 @@ def generate_feature_maps(image_sitk,binary_mask_sitk,quantized_image_array,
             viz = sitk.GetImageFromArray(scaled)
             viz.CopyInformation(image_sitk)
             sitk.WriteImage(viz,os.path.join(output_dir,f'{prefix}_MAP_{name}_uint8.nii.gz'))
-
-# GLAM_RDF_FAST_PATCH_V2
-from .rdf_fast import calculate_rdf_3d as _fast_calculate_rdf_3d

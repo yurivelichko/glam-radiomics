@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath('../../'))
 project = 'GLAM Radiomics'
 copyright = '2026, Yuri S. Velichko, Northwestern University. All Rights Reserved'
 author = 'Yuri S. Velichko'
-release = '1.6.4'
+release = '1.6.5'
 
 # -- General configuration ---------------------------------------------------
 extensions = [

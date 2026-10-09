@@ -719,6 +719,7 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
 
     # 1. Hardware Check & CPU Fallback
     if not HAS_GPU:
+        print("  > DEBUG: No GPU detected. Falling back to CPU cKDTree RDF calculation.")
         return _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
                                      total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask)
 
@@ -843,14 +844,112 @@ def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
     return pd.DataFrame(df_data)
 
 
-def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts,
-                          total_roi_voxels, num_randomisations, rdf_sample_points,
-                          sample_mask=None):
-    from .rdf_fast import calculate_rdf_3d as fast_rdf
-    return fast_rdf(image_3d, num_levels, max_radius, level_counts,
-                    total_roi_voxels, num_randomisations, rdf_sample_points,
-                    sample_mask=sample_mask)
+def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask=None):
+    """
+    Fallback CPU function using scipy cKDTree and boundary correction.
+    """
+    image_3d = np.asarray(image_3d)
+    if image_3d.ndim != 3 or max_radius < 1 or rdf_sample_points < 1:
+        raise ValueError("RDF requires 3D input, positive radius and sample count")
+    if sample_mask is None:
+        sample_mask = image_3d >= 0
+    else:
+        sample_mask = np.asarray(sample_mask) > 0
+    if sample_mask.shape != image_3d.shape:
+        raise ValueError("RDF mask/image shape mismatch")
+    values = image_3d[sample_mask]
+    if values.size == 0 or np.any(values < 0) or np.any(values >= num_levels):
+        raise ValueError("Empty RDF ROI or invalid gray levels")
+    if not np.all(values == np.floor(values)):
+        raise ValueError("RDF gray levels must be integers")
+    if values.size != total_roi_voxels:
+        raise ValueError("RDF total_roi_voxels differs from actual ROI size")
+    level_counts = np.bincount(values.astype(int), minlength=num_levels).tolist()
+    v_intersect_maps = {}
+    if sample_mask is not None:
+        mask_float = (sample_mask > 0).astype(float)
+        for r in range(1, max_radius + 1):
+            kernel = get_shell_kernel(r)
+            v_intersect_maps[r] = np.maximum(0.0, np.rint(scipy.signal.fftconvolve(mask_float, kernel, mode='same')))
+    else:
+        v_ideal = {r: float(get_shell_kernel(r).sum()) for r in range(1, max_radius + 1)}
 
+    coords = []
+    for i in range(num_levels):
+        if sample_mask is not None:
+            mask_i = (image_3d == i) & (sample_mask > 0)
+        else:
+            mask_i = (image_3d == i)
+        coords.append(np.argwhere(mask_i))
+        level_counts[i] = len(coords[-1])
+
+    rdf_data = defaultdict(lambda: defaultdict(float))
+
+    for alpha in range(num_levels):
+        if level_counts[alpha] == 0: continue
+
+        coords_alpha = coords[alpha]
+        if len(coords_alpha) == 0: continue
+
+        num_ref_points = min(len(coords_alpha), rdf_sample_points)
+        if num_ref_points == 0: continue
+
+        ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
+        ref_points = coords_alpha[ref_indices]
+
+        if sample_mask is not None:
+            v_shell_alpha = {r: v_intersect_maps[r][ref_points[:,0], ref_points[:,1], ref_points[:,2]] for r in range(1, max_radius + 1)}
+
+        for beta in range(num_levels):
+            if level_counts[beta] == 0: continue
+
+            target_points = coords[beta]
+            tree = cKDTree(target_points)
+
+            neighbors = tree.query_ball_point(ref_points, max_radius + 0.5)
+
+            accumulated_density = np.zeros(max_radius + 1)
+            valid_point_counts = np.zeros(max_radius + 1)
+
+            for i, n_indices in enumerate(neighbors):
+                counts_i = np.zeros(max_radius + 1)
+
+                for j in n_indices:
+                    if alpha == beta and np.array_equal(ref_points[i], target_points[j]):
+                        continue
+
+                    dist = np.linalg.norm(ref_points[i] - target_points[j])
+                    if dist < max_radius + 0.5:
+                        r_bin = int(np.floor(dist + 0.5))
+                        if 1 <= r_bin <= max_radius:
+                            counts_i[r_bin] += 1
+
+                for r in range(1, max_radius + 1):
+                    if sample_mask is not None:
+                        v = v_shell_alpha[r][i]
+                        if v > 0:
+                            accumulated_density[r] += counts_i[r] / v
+                            valid_point_counts[r] += 1
+                    else:
+                        accumulated_density[r] += counts_i[r] / v_ideal[r]
+                        valid_point_counts[r] += 1
+
+            rho_beta = level_counts[beta] / total_roi_voxels
+            if rho_beta == 0: continue
+
+            for r in range(1, max_radius + 1):
+                if valid_point_counts[r] > 0:
+                    rdf_data[(alpha, beta)][r] = (accumulated_density[r] / valid_point_counts[r]) / rho_beta
+
+    df_data = []
+    for r in range(1, max_radius + 1):
+        row = {'r': r}
+        for alpha in range(num_levels):
+            for beta in range(num_levels):
+                row[f'g_{alpha}_{beta}'] = rdf_data.get((alpha, beta), {}).get(r, 0)
+        df_data.append(row)
+
+    return pd.DataFrame(df_data)
 
 
 
@@ -3831,5 +3930,3 @@ def _fit_multifractal_moments(processed_sizes, Z, q_values):
     else:
         result["Width"] = result["Alpha_0"] = np.nan
     return result
-
-# GLAM_RDF_FAST_PATCH_V2
