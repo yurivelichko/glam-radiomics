@@ -39,6 +39,7 @@ A typical configuration file is structured as follows:
 
     [File_Naming]
     # Intencity normalization mask identifiers. 
+    # Leave the NormMaskIdentifiers list [] empty to use 'MaskIdentifiers' for normalization.
     NormMaskIdentifiers = ["_brain.nii.gz", "_skullstripped.nii.gz"]
 
     # Segmentation file identifiers. 

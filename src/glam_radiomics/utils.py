@@ -40,13 +40,12 @@ def find_scan_mask_pairs(directory):
                 is_norm_mask = True
                 break
                 
-        # 2. Check for Analysis Mask (if not a norm mask)
-        if not is_norm_mask:
-            for identifier in mask_id_lower:
-                if f_lower.endswith(identifier): 
-                    mask_paths.append(os.path.join(directory, f))
-                    is_mask = True
-                    break
+        # 2. Check for Analysis Mask (Independent check)
+        for identifier in mask_id_lower:
+            if f_lower.endswith(identifier): 
+                mask_paths.append(os.path.join(directory, f))
+                is_mask = True
+                break
                     
         # 3. Otherwise, it's a potential image sequence
         if not is_mask and not is_norm_mask:
