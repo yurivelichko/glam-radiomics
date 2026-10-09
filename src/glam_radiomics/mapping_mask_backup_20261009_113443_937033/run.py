@@ -686,13 +686,6 @@ def process_single_scan(prefix, paths, output_dir, config_path):
                 import traceback
                 traceback.print_exc()
 
-    # Independent mapping, once per sequence for File mode.
-    from .mapping_mask import generate_scan_maps
-    try:
-        generate_scan_maps(prefix, paths, output_dir, config_path, labels_to_process)
-    except Exception:
-        print("  - ERROR: Independent mapping failed; global feature rows retained.")
-        traceback.print_exc()
     return primary_rows_list, meta_rows_list
 
 def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_name, seq_name, output_dir, config_path, global_min=None, global_max=None):
@@ -836,6 +829,30 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
     }
 
     # --- 5. Feature Mapping ---
+    if get_config('EnableMapping'):
+        try:
+            full_mask_array = sitk.GetArrayFromImage(binary_mask_sitk)
+            cropped_quantized = prep_data['quantized_image']
+            
+            if crop_slices is None:
+                mapping_quantized = cropped_quantized
+            else:
+                mapping_quantized = np.full(full_mask_array.shape, -1, dtype=np.int16)
+                mapping_quantized[crop_slices] = cropped_quantized
+                
+            if mapping_quantized.shape != full_mask_array.shape:
+                raise ValueError(
+                    f"Mapping shape mismatch: quantized={mapping_quantized.shape}, mask={full_mask_array.shape}"
+                )
+                
+            mapping.generate_feature_maps(
+                image_sitk, binary_mask_sitk, mapping_quantized,
+                num_gray_levels, prefix, output_dir, config_path
+            )
+        except Exception:
+            print("  - ERROR: Feature Mapping failed:")
+            import traceback
+            traceback.print_exc()
 
     return primary_feature_row, meta_feature_row
 
@@ -861,4 +878,3 @@ def main():
     process_scans(args.input_dir, args.output_dir, args.project_name, config_path=args.config)
 
     print("Analysis finished.")
-# GLAM_MAPPING_MASK_V3

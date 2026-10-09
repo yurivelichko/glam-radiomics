@@ -19,7 +19,6 @@ def load_config(config_path):
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found at: {os.path.abspath(config_path)}")
     
-    config = configparser.ConfigParser()
     config.read(config_path)
     
     # --- Pre-parse all values into a simple dict ---
@@ -90,8 +89,6 @@ def load_config(config_path):
         parsed['MapOverlapPercent'] = config.getfloat('Feature_Mapping', 'MapOverlapPercent', fallback=50.0)
         parsed['MapSaveVisualization'] = config.getboolean('Feature_Mapping', 'MapSaveVisualization', fallback=False)
 
-        from .mapping_mask import parse_mapping_settings
-        parsed.update(parse_mapping_settings(config))
         parsed_config = parsed
         print(f"Configuration successfully loaded from {config_path}")
 
@@ -109,4 +106,3 @@ def get_config(key):
     if val is None:
         raise KeyError(f"Configuration key '{key}' not found in parsed config.")
     return val
-# GLAM_MAPPING_MASK_V3
