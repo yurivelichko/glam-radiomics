@@ -92,7 +92,6 @@ def load_config(config_path):
 
         from .mapping_mask import parse_mapping_settings
         parsed.update(parse_mapping_settings(config))
-        parsed['MapInterpolate'] = config.getboolean('Feature_Mapping', 'MapInterpolate', fallback=False)
         parsed_config = parsed
         print(f"Configuration successfully loaded from {config_path}")
 
@@ -111,5 +110,3 @@ def get_config(key):
         raise KeyError(f"Configuration key '{key}' not found in parsed config.")
     return val
 # GLAM_MAPPING_MASK_V3
-
-# GLAM_MAP_INTERPOLATION_V4

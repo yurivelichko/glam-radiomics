@@ -204,17 +204,6 @@ def generate_feature_maps(image_sitk,binary_mask_sitk,quantized_image_array,
             viz = sitk.GetImageFromArray(scaled)
             viz.CopyInformation(image_sitk)
             sitk.WriteImage(viz,os.path.join(output_dir,f'{prefix}_MAP_{name}_uint8.nii.gz'))
-        if get_config('MapInterpolate'):
-            try:
-                from .map_interpolation import save_interpolated_map
-                save_interpolated_map(array, mask, strides, image_sitk, prefix, name,
-                                      output_dir, get_config('MapSaveVisualization'))
-            except Exception:
-                import traceback
-                print(f"  - ERROR: Interpolation failed for {name}; sampled map retained.")
-                traceback.print_exc()
 
 # GLAM_RDF_FAST_PATCH_V2
 from .rdf_fast import calculate_rdf_3d as _fast_calculate_rdf_3d
-
-# GLAM_MAP_INTERPOLATION_V4
