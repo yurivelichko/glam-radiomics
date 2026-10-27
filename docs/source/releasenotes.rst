@@ -3,6 +3,26 @@ Release Notes
 
 The GLAM framework is written in Python and leverages high-performance libraries for spatial indexing (KD-trees) and medical image analysis. It operates as a fully standalone extraction engine, meaning it does not require external radiomics packages to compute conventional texture matrices.
 
+GLAM 1.8.8 (Core Engine Update)
+-------------------------------------------------------------
+- October 2026
+- **Batched GPU RDF Feature Reduction:**
+  * Offloaded adjacent batched RDF tensor calculations (PotentialEnergy, EnergyDensity, StructuralPressureIndex, Compressibility, B2, Wasserstein, PhenotypicDistance, RDF shape statistics, and _Symlog/_Ln/_Log1p transforms) directly to CuPy on the GPU.
+  * Includes automatic first-batch parity verification against isolated CPU reference workers.
+- **Cached Savitzky–Golay Linear Operators:**
+  * Replaced dynamic per-node savgol_filter calls in rdf_smoothing.py with precomputed, cached $L \times L$ linear projection matrices $P_L$ (sub @ P_L), yielding a $5\times$ speedup on CPU smoothing routines while matching scipy.signal to $\text{rtol}=10^{-13}$.
+- **Vectorized CPU Anisotropy Solver:**
+  * Eliminated inner Python loops in _calculate_anisotropic_glam_features_cpu using np.add.reduceat.
+- **Zero-Overhead Startup (GLAM_BENCHMARK_REDUCE=0):**
+  * Bypassed the multi-worker reduction benchmark loop by default to eliminate startup latency on sequence initialization.
+- **Configurational Disorder Index (CDI) Guard & Damping:**
+  * Added strict positive-shell guards (struct_raw > 1e-6, rand_raw > 1e-6, struct_smooth > 1e-3, rand_smooth > 1e-3) to calculate_configurational_disorder_index in core.py to prevent empty or Savitzky–Golay negative-undershot shells from injecting log(1e-9) = -20.72 artifacts.
+  * Implemented Tikhonov regularization ($\epsilon_{\text{reg}}=10^{-2}$) in the disorder ratio calculation to smoothly damp numerical singularities when $g_{\text{struct}}(r) \approx g_{\text{rand}}(r)$.
+- **Robust Preview Map Scaling (_scale_array_to_uint8_robust):**
+  * Replaced raw min-max scaling with robust [0.5, 99.5] percentile windowing for both _uint8.nii.gz (in mapping.py) and _Interpolated_uint8.nii.gz (in map_interpolation.py), preventing single boundary outlier spikes from flattening 8-bit visualization dynamic range.
+- **Log-Transform Extensions:**
+  * Added 'RDF_DispersionRatio' to _LOG1P_LN_BASES in mapping.py, enabling clean $\ln(1 + x)$ dispersion transforms while preserving zero-variance pairs as 0.0.
+
 GLAM 1.6.4 (Core Physics & Boundary Continuity Engine Update)
 -------------------------------------------------------------
 - October 2026

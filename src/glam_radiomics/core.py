@@ -657,7 +657,7 @@ def calculate_shape_features_3d(mask_sitk, prefix):
         try:
             # Downsample massive whole-organ masks to prevent CPU hanging
             if len(physical_coords) > 25000:
-                indices = np.random.choice(len(physical_coords), 25000, replace=False)
+                indices = np.linspace(0, len(physical_coords) - 1, 25000, dtype=int)
                 hull_coords = physical_coords[indices]
             else:
                 hull_coords = physical_coords
@@ -692,155 +692,205 @@ def get_shell_kernel(r):
     return ((distance >= r - 0.5) & (distance < r + 0.5)).astype(float)
 
 
-def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts, 
-                     total_roi_voxels, num_randomisations, rdf_sample_points, 
-                     sample_mask=None): 
+_LAST_GPU_RDF_GEOMETRY = None
+
+
+class _GpuRdfGeometry:
+    """Cached CuPy 3D FFT shell denominators for global RDF calculation."""
+    def __init__(self, mask, radius):
+        from scipy.fft import next_fast_len
+        from .rdf_fast import _shell_kernel
+
+        self.mask = mask.copy()
+        self.radius = int(radius)
+        self.shape = mask.shape
+        self.coords = np.argwhere(mask)
+        self.indices_cpu = tuple(self.coords.T)
+        self.indices_gpu = tuple(cp.asarray(idx) for idx in self.indices_cpu)
+        self.extent = np.minimum(self.radius, np.asarray(self.shape) - 1).astype(int)
+        self.kernel_shape = tuple(2 * self.extent + 1)
+        self.fft_shape = tuple(
+            next_fast_len(d + k - 1) for d, k in zip(self.shape, self.kernel_shape)
+        )
+        self.crop = tuple(
+            slice(int(e), int(e) + d) for e, d in zip(self.extent, self.shape)
+        )
+        self._shell_kernel = _shell_kernel
+        self.kernels_gpu = {}
+        self.cached_bytes = 0
+        self.max_cache_bytes = 512 * 1024 * 1024
+        self.denominators_cpu = np.zeros((self.radius, len(self.coords)), dtype=np.float64)
+
+        mask_gpu = cp.asarray(mask, dtype=cp.float64)
+        mask_fft = cp.fft.rfftn(mask_gpu, s=self.fft_shape)
+        for r in range(1, self.radius + 1):
+            kfft = self.kernel_fft(r)
+            counts_gpu = self.counts(mask_fft, kfft)
+            self.denominators_cpu[r - 1] = cp.asnumpy(counts_gpu[self.indices_gpu])
+        del mask_gpu, mask_fft
+
+    def kernel_fft(self, r):
+        if r in self.kernels_gpu:
+            return self.kernels_gpu[r]
+        kernel = self._shell_kernel(r, self.shape)
+        pad = tuple(
+            (int(e) - (k - 1) // 2, int(e) - (k - 1) // 2)
+            for e, k in zip(self.extent, kernel.shape)
+        )
+        kernel = np.pad(kernel, pad)
+        kfft = cp.fft.rfftn(cp.asarray(kernel, dtype=cp.float64), s=self.fft_shape)
+        if self.cached_bytes + kfft.nbytes <= self.max_cache_bytes:
+            self.kernels_gpu[r] = kfft
+            self.cached_bytes += kfft.nbytes
+        return kfft
+
+    def counts(self, image_fft, kernel_fft):
+        raw = cp.fft.irfftn(image_fft * kernel_fft, s=self.fft_shape)[self.crop]
+        rounded = cp.rint(raw)
+        if float(cp.max(cp.abs(raw - rounded)).item()) > 1e-4:
+            raise FloatingPointError("GPU FFT shell counts exceed integer-rounding tolerance")
+        return cp.maximum(rounded, 0.0)
+
+
+def _get_gpu_rdf_geometry(mask, radius):
+    global _LAST_GPU_RDF_GEOMETRY
+    old = _LAST_GPU_RDF_GEOMETRY
+    if (
+        old is not None
+        and old.radius == radius
+        and old.shape == mask.shape
+        and np.array_equal(old.mask, mask)
+    ):
+        return old
+    _LAST_GPU_RDF_GEOMETRY = None
+    old = None
+    cp.get_default_memory_pool().free_all_blocks()
+    _LAST_GPU_RDF_GEOMETRY = _GpuRdfGeometry(mask, radius)
+    return _LAST_GPU_RDF_GEOMETRY
+
+
+def calculate_rdf_3d(image_3d, num_levels, max_radius, level_counts,
+                     total_roi_voxels, num_randomisations, rdf_sample_points,
+                     sample_mask=None):
     """
     Calculates the boundary-corrected Radial Distribution Function (RDF) for a 3D image.
-    Uses pure cuBLAS matrix math with dynamic intersection-volume normalization.
+    Uses deterministic CuPy 3D FFTs over all supported alpha voxels when HAS_GPU is True,
+    with automatic fallback to CPU rdf_fast.calculate_rdf_3d when HAS_GPU is False.
+    Enforces identical `sample_mask` focal-reference vs target-domain semantics on GPU and CPU.
     """
-    image_3d = np.asarray(image_3d)
-    if image_3d.ndim != 3 or max_radius < 1 or rdf_sample_points < 1:
-        raise ValueError("RDF requires 3D input, positive radius and sample count")
-    if sample_mask is None:
-        sample_mask = image_3d >= 0
-    else:
-        sample_mask = np.asarray(sample_mask) > 0
-    if sample_mask.shape != image_3d.shape:
-        raise ValueError("RDF mask/image shape mismatch")
-    values = image_3d[sample_mask]
-    if values.size == 0 or np.any(values < 0) or np.any(values >= num_levels):
-        raise ValueError("Empty RDF ROI or invalid gray levels")
-    if not np.all(values == np.floor(values)):
-        raise ValueError("RDF gray levels must be integers")
-    if values.size != total_roi_voxels:
-        raise ValueError("RDF total_roi_voxels differs from actual ROI size")
-    level_counts = np.bincount(values.astype(int), minlength=num_levels).tolist()
-
-    # 1. Hardware Check & CPU Fallback
     if not HAS_GPU:
-        return _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts, 
-                                     total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask)
+        return _calculate_rdf_3d_cpu(
+            image_3d, num_levels, max_radius, level_counts,
+            total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask
+        )
 
-    dev = cp.cuda.Device(0)
-    free_mem, _ = dev.mem_info
-    safe_vram_bytes = free_mem * 0.5 
-    print("  - Starting RDF Calculation (GPU Accelerated)...")
+    from .rdf_fast import _support_params, _required_median_volumes, _resolve_target_and_ref_masks
+    from .rdf_smoothing import attach_geometric_support
 
-    # 2. Precompute Dynamic Intersection Volumes (CPU side to save VRAM)
-    v_intersect_maps = {}
-    if sample_mask is not None:
-        mask_float = (sample_mask > 0).astype(float)
-        for r in range(1, max_radius + 1):
-            kernel = get_shell_kernel(r)
-            v_intersect_maps[r] = np.maximum(0.0, np.rint(scipy.signal.fftconvolve(mask_float, kernel, mode='same')))
-    else:
-        # Ideal volumes if no mask is provided
-        v_ideal = {r: float(get_shell_kernel(r).sum()) for r in range(1, max_radius + 1)}
+    image = np.asarray(image_3d)
+    if image.ndim != 3:
+        raise ValueError("RDF requires a 3D image")
+    for name, value in [
+        ("num_levels", num_levels),
+        ("max_radius", max_radius),
+        ("rdf_sample_points", rdf_sample_points),
+    ]:
+        if not np.isfinite(value) or int(value) != value or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
 
-    # 3. Define ALL potential neighbors (The "System") restricted to mask
-    coords = []
-    for i in range(num_levels):
-        if sample_mask is not None:
-            mask_i = (image_3d == i) & (sample_mask > 0)
-        else:
-            mask_i = (image_3d == i)
-        coords.append(np.argwhere(mask_i))
-        # Update level counts to reflect ONLY masked voxels
-        level_counts[i] = len(coords[-1]) 
+    levels, radius = int(num_levels), int(max_radius)
+    target_mask, ref_mask = _resolve_target_and_ref_masks(image, sample_mask, total_roi_voxels)
+    values = image[target_mask]
+    if not values.size or values.size != total_roi_voxels:
+        raise ValueError("Empty RDF ROI or total_roi_voxels mismatch")
+    if (
+        not np.isfinite(values).all()
+        or np.any(values < 0)
+        or np.any(values >= levels)
+        or np.any(values != np.floor(values))
+    ):
+        raise ValueError("Invalid RDF gray levels")
 
-    coords_gpu = [cp.array(c, dtype=cp.float32) if len(c) > 0 else None for c in coords]
-    rdf_data = defaultdict(lambda: defaultdict(float))
+    labels = values.astype(np.int64)
+    counts = np.bincount(labels, minlength=levels)
+    is_ref = ref_mask[target_mask]
 
-    for alpha in range(num_levels):
-        if level_counts[alpha] == 0: continue
+    try:
+        geom = _get_gpu_rdf_geometry(target_mask, radius)
+        min_support_n, min_support_fraction, min_median_volume, min_ref_volume, min_shell_fraction = _support_params()
+        req_median_by_r = _required_median_volumes(radius, min_median_volume, min_shell_fraction)
+        alpha_radius_valid = np.zeros((radius, levels), dtype=bool)
+        ref_weights = np.zeros((radius, labels.size), dtype=np.float64)
 
-        coords_alpha = coords[alpha]
-        if len(coords_alpha) == 0: continue
-
-        num_ref_points = min(len(coords_alpha), rdf_sample_points)
-        if num_ref_points == 0: continue
-
-        ref_indices = np.random.choice(len(coords_alpha), num_ref_points, replace=False)
-        ref_points = coords_alpha[ref_indices]
-        ref_points_gpu = cp.array(ref_points, dtype=cp.float32)
-
-        # Pre-extract exact shell volumes for these specific reference points
-        if sample_mask is not None:
-            v_shell_alpha = {r: v_intersect_maps[r][ref_points[:,0], ref_points[:,1], ref_points[:,2]] for r in range(1, max_radius + 1)}
-            v_shell_gpu = {r: cp.array(v_shell_alpha[r], dtype=cp.float32) for r in range(1, max_radius + 1)}
-
-        for beta in range(num_levels):
-            if level_counts[beta] == 0: continue
-            target_points_gpu = coords_gpu[beta]
-            if target_points_gpu is None: continue
-
-            num_targets = target_points_gpu.shape[0]
-            bytes_per_ref = num_targets * 40
-
-            batch_size = int(safe_vram_bytes // bytes_per_ref)
-            batch_size = max(1, min(batch_size, num_ref_points))
-
-            # Track accumulated density and valid points per shell
-            accumulated_density = cp.zeros(max_radius + 1, dtype=cp.float32)
-            valid_point_counts = cp.zeros(max_radius + 1, dtype=cp.float32)
-
-            B_sq = cp.sum(target_points_gpu**2, axis=1)
-
-            for i in range(0, num_ref_points, batch_size):
-                batch_refs = ref_points_gpu[i : i + batch_size]
-
-                A_sq = cp.sum(batch_refs**2, axis=1, keepdims=True)
-                AB = cp.matmul(batch_refs, target_points_gpu.T)
-
-                dist_sq = A_sq + B_sq - 2.0 * AB
-                dists = cp.sqrt(cp.maximum(dist_sq, 0.0)) 
-
-                if alpha == beta:
-                    valid_mask = (dists > 1e-6) & (dists < max_radius + 0.5)
+        for alpha in range(levels):
+            alpha_ids = np.flatnonzero(is_ref & (labels == alpha))
+            if not alpha_ids.size:
+                continue
+            tail_failed = False
+            for r in range(1, radius + 1):
+                if tail_failed:
+                    continue
+                volumes = geom.denominators_cpu[r - 1, alpha_ids]
+                valid_mask = volumes >= min_ref_volume
+                supported = volumes[valid_mask]
+                total_shell_vol = float(np.sum(supported))
+                valid = (
+                    supported.size >= min_support_n
+                    and supported.size / alpha_ids.size >= min_support_fraction
+                    and total_shell_vol > 0.0
+                    and float(np.median(supported)) >= req_median_by_r[r - 1]
+                )
+                if valid:
+                    alpha_radius_valid[r - 1, alpha] = True
+                    ref_weights[r - 1, alpha_ids[valid_mask]] = 1.0 / total_shell_vol
                 else:
-                    valid_mask = (dists < max_radius + 0.5)
+                    tail_failed = True
 
-                bins = cp.floor(dists + 0.5).astype(cp.int32)
+        any_valid_at_r = np.any(alpha_radius_valid, axis=1)
+        result_gpu = cp.zeros((radius, levels, levels), dtype=cp.float64)
+        image_gpu = cp.asarray(image)
+        mask_gpu = cp.asarray(target_mask)
 
-                # Bin row-by-row to maintain per-reference point counts
-                for r in range(1, max_radius + 1):
-                    # sum over targets for each reference point
-                    counts_r = cp.sum((bins == r) & valid_mask, axis=1) 
+        for beta in range(levels):
+            if not counts[beta]:
+                continue
+            beta_mask_gpu = (mask_gpu & (image_gpu == beta)).astype(cp.float64)
+            beta_fft = cp.fft.rfftn(beta_mask_gpu, s=geom.fft_shape)
+            rho = counts[beta] / values.size
+            for r in range(1, radius + 1):
+                if not any_valid_at_r[r - 1]:
+                    continue
+                neighbor_counts = cp.asnumpy(
+                    geom.counts(beta_fft, geom.kernel_fft(r))[geom.indices_gpu]
+                )
+                result_gpu[r - 1, :, beta] = cp.asarray(
+                    np.bincount(
+                        labels,
+                        weights=neighbor_counts * ref_weights[r - 1],
+                        minlength=levels,
+                    )
+                    / rho
+                )
 
-                    if sample_mask is not None:
-                        v_batch = v_shell_gpu[r][i : i + batch_size]
-                        valid_v = v_batch > 0
-
-                        if cp.any(valid_v):
-                            local_densities = counts_r[valid_v] / v_batch[valid_v]
-                            accumulated_density[r] += cp.sum(local_densities)
-                            valid_point_counts[r] += cp.sum(valid_v)
-                    else:
-                        accumulated_density[r] += cp.sum(counts_r) / v_ideal[r]
-                        valid_point_counts[r] += counts_r.shape[0]
-
-            acc_den_cpu = accumulated_density.get()
-            vpc_cpu = valid_point_counts.get()
-
-            rho_beta = level_counts[beta] / total_roi_voxels
-            if rho_beta == 0: continue
-
-            for r in range(1, max_radius + 1):
-                if vpc_cpu[r] > 0:
-                    rdf_data[(alpha, beta)][r] = (acc_den_cpu[r] / vpc_cpu[r]) / rho_beta
-
+        result = cp.asnumpy(result_gpu)
+        del result_gpu, image_gpu, mask_gpu
         cp.get_default_memory_pool().free_all_blocks()
+    except cp.cuda.memory.OutOfMemoryError:
+        print('  - WARNING: GPU out of memory in RDF FFT; falling back to CPU...')
+        global _LAST_GPU_RDF_GEOMETRY
+        _LAST_GPU_RDF_GEOMETRY = None
+        cp.get_default_memory_pool().free_all_blocks()
+        return _calculate_rdf_3d_cpu(
+            image_3d, num_levels, max_radius, level_counts,
+            total_roi_voxels, num_randomisations, rdf_sample_points, sample_mask
+        )
 
-    df_data = []
-    for r in range(1, max_radius + 1):
-        row = {'r': r}
-        for alpha in range(num_levels):
-            for beta in range(num_levels):
-                row[f'g_{alpha}_{beta}'] = rdf_data.get((alpha, beta), {}).get(r, 0)
-        df_data.append(row)
-
-    return pd.DataFrame(df_data)
+    r_vec = np.arange(1, radius + 1, dtype=np.float64)
+    cols = ["r"] + [f"g_{a}_{b}" for a in range(levels) for b in range(levels)]
+    flat_pairs = result.reshape(radius, levels * levels)
+    df = pd.DataFrame(np.hstack((r_vec[:, None], flat_pairs)), columns=cols, copy=False)
+    df.attrs["_glam_fast_raw"] = (r_vec, np.ascontiguousarray(flat_pairs.T))
+    return attach_geometric_support(df, alpha_radius_valid, counts)
 
 
 def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts,
@@ -856,186 +906,341 @@ def _calculate_rdf_3d_cpu(image_3d, num_levels, max_radius, level_counts,
 
 
 def calculate_glam_b2_3d(rdf_structured_df, rdf_random_df, num_levels):
-    """Calculates the 3D B2 coefficient."""
+    """Calculates the 3D B2 coefficient strictly over each pair's common supported domain
+    `L = min(cut_s, cut_r)`, validating that structured and baseline radius grids match.
+    """
     glam_b2_coeffs = {}
-    if rdf_structured_df.empty or rdf_random_df.empty: return {}
-    r = rdf_structured_df['r'].values
+    if rdf_structured_df.empty or rdf_random_df.empty:
+        return {}
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r_s, raw_s, _, s_map = extract_fast_raw_rdf(rdf_structured_df, num_levels)
+    r_r, raw_r, _, r_map = extract_fast_raw_rdf(rdf_random_df, num_levels)
+    if not np.array_equal(r_s, r_r):
+        raise ValueError('Structured and baseline RDF radius grids differ')
+    cut_s = get_row_cutoff_indices(raw_s, rdf_structured_df)
+    cut_r = get_row_cutoff_indices(raw_r, rdf_random_df)
+
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
-            b2_key = f'GLAM_B2_for_{key}'
-            if key in rdf_structured_df.columns and key in rdf_random_df.columns:
-                g_r_structured = rdf_structured_df[key].values
-                g_r_random = rdf_random_df[key].values
-                integrand = (g_r_structured - g_r_random) * r**2
-                B2 = -2 * np.pi * np.trapezoid(integrand, r)
-                glam_b2_coeffs[b2_key] = B2
+            b2_key = f'GLAM_B2_for_g_{alpha}_{beta}'
+            si = s_map.get((alpha, beta))
+            ri = r_map.get((alpha, beta))
+            if si is None or ri is None:
+                glam_b2_coeffs[b2_key] = np.nan
+                continue
+            L = min(int(cut_s[si]), int(cut_r[ri]))
+            if L < 2:
+                glam_b2_coeffs[b2_key] = np.nan
+                continue
+            r_sub = r_s[:L]
+            integrand = (raw_s[si, :L] - raw_r[ri, :L]) * (r_sub ** 2)
+            glam_b2_coeffs[b2_key] = float(-2.0 * np.pi * np.trapezoid(integrand, r_sub))
     return glam_b2_coeffs
 
 
 def calculate_glam_inverse_correlation_length(rdf_structured_df, rdf_random_df, num_levels):
-    """Calculates the Inverse Positional Correlation Length (Decay Rate, kappa)."""
+    """Calculates the Inverse Positional Correlation Length (Decay Rate, kappa)
+    strictly within each pair's common supported domain `L = min(cut_s, cut_r)`.
+    """
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
 
     glam_inv_corr_lengths = {}
-    if rdf_structured_df.empty or rdf_random_df.empty: return {}
-    
-    # NEW: Fit the Decay Rate (kappa) directly
-    def exp_decay_rate(r, A, kappa): 
+    if rdf_structured_df.empty or rdf_random_df.empty:
+        return {}
+
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r_vals, raw_s, _, s_map = extract_fast_raw_rdf(rdf_structured_df, num_levels)
+    r_rand, raw_r, _, r_map = extract_fast_raw_rdf(rdf_random_df, num_levels)
+    if not np.array_equal(r_vals, r_rand):
+        raise ValueError('Structured and baseline RDF radius grids differ')
+    cut_s = get_row_cutoff_indices(raw_s, rdf_structured_df)
+    cut_r = get_row_cutoff_indices(raw_r, rdf_random_df)
+
+    def exp_decay_rate(r, A, kappa):
         return A * np.exp(-kappa * r)
 
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
             inv_corr_len_key = f'GLAM_InverseCorrelationLength_{alpha}_{beta}'
-            
-            if key not in rdf_structured_df.columns or key not in rdf_random_df.columns:
+            si = s_map.get((alpha, beta))
+            ri = r_map.get((alpha, beta))
+            if si is None or ri is None:
                 glam_inv_corr_lengths[inv_corr_len_key] = np.nan
                 continue
-            
-            h_r_raw = rdf_structured_df[key].values - rdf_random_df[key].values
-            r_vals = rdf_structured_df['r'].values
 
-            if len(h_r_raw) > savgol_window:
-                h_r = savgol_filter(h_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
+            L = min(int(cut_s[si]), int(cut_r[ri]))
+            if L < 6:
+                glam_inv_corr_lengths[inv_corr_len_key] = np.nan
+                continue
+
+            h_r_raw = raw_s[si, :L] - raw_r[ri, :L]
+            if not np.any(np.abs(h_r_raw) > 1e-9):
+                glam_inv_corr_lengths[inv_corr_len_key] = np.nan
+                continue
+
+            r_sub = r_vals[:L]
+            if L > savgol_window:
+                h_r = savgol_filter(h_r_raw, savgol_window, savgol_poly, mode='interp')
             else:
-                h_r = h_r_raw 
+                h_r = h_r_raw
 
             try:
-                search_range = len(r_vals) // 2
-                if search_range < 3: raise ValueError("Not enough data points.")
-                
-                peak_index = np.argmax(np.abs(h_r[:search_range]))
-                
-                if peak_index + 3 >= len(r_vals): raise ValueError("Peak too close to end.")
-                
-                r_fit = r_vals[peak_index:]
-                h_fit = np.abs(h_r[peak_index:]) 
-                
-                # NEW: Initial guess (0.3 is a safe default decay rate)
-                initial_guess = [np.abs(h_r[peak_index]), 0.3] 
-                
-                # NEW: Clean bounds. A >= 0, kappa >= 0. No dynamic cap needed!
-                popt, _ = curve_fit(exp_decay_rate, r_fit, h_fit, p0=initial_guess, maxfev=1000, 
-                                    ftol=1e-3, method='trf', bounds=([0, 0], [np.inf, np.inf]))
-                
-                glam_inv_corr_lengths[inv_corr_len_key] = popt[1] # This is kappa!
-                
-            except (RuntimeError, ValueError) as e:
+                search_range = L // 2
+                if search_range < 3:
+                    raise ValueError("Not enough supported data points.")
+                peak_index = int(np.argmax(np.abs(h_r[:search_range])))
+                if peak_index + 3 >= L:
+                    raise ValueError("Peak too close to support cutoff.")
+
+                r_fit = r_sub[peak_index:]
+                h_fit = np.abs(h_r[peak_index:])
+                if float(np.max(h_fit)) <= 1e-9:
+                    raise ValueError("Zero amplitude in fit window.")
+
+                initial_guess = [float(np.abs(h_r[peak_index])), 0.3]
+                popt, _ = curve_fit(
+                    exp_decay_rate, r_fit, h_fit, p0=initial_guess,
+                    maxfev=1000, ftol=1e-8, method='trf',
+                    bounds=([0, 0], [np.inf, np.inf]),
+                )
+                glam_inv_corr_lengths[inv_corr_len_key] = float(popt[1])
+            except (RuntimeError, ValueError):
                 glam_inv_corr_lengths[inv_corr_len_key] = np.nan
-                
+
     return glam_inv_corr_lengths
 
 
+def _resolve_contact_peak_rmin(g_r, L):
+    """Resolve first coordination shell horizon `r_min_idx` when the RDF peaks at
+    nearest-neighbor contact (`first_peak_idx == 0`, i.e., r = 1):
+    1. First strict interior local minimum (`diffs[:-1] < 0` and `diffs[1:] > 0`).
+    2. First radius where `g_r <= 1.0` (crossing the random-packing baseline).
+    3. Default short-range contact coordination horizon `min(4, L - 1)`.
+    """
+    if L <= 2:
+        return 1
+    diffs = np.diff(g_r)
+    if L >= 3:
+        strict_min = np.flatnonzero((diffs[:-1] < 0) & (diffs[1:] > 0))
+        if strict_min.size > 0:
+            return int(strict_min[0]) + 1
+    below_unity = np.flatnonzero(g_r[1:] <= 1.0)
+    if below_unity.size > 0:
+        return max(1, min(int(below_unity[0]) + 1, L - 1))
+    return min(4, L - 1)
+
+
+def _find_first_shell_minima_cutoff_safe(g_mat, cutoff_idx, active_mask, max_search_r, peak_prominence):
+    """Vectorized cutoff-safe solver for first coordination shell minimum `r_min_idx`
+    strictly within each row's supported prefix `:L` (`L = cutoff_idx[idx]`).
+    Supports both interior peaks (`first_peak_idx > 0`) and nearest-neighbor contact
+    peaks (`first_peak_idx == 0`, where g(r) is highest at r = 1).
+    """
+    n_pairs, _ = g_mat.shape
+    r_min_indices = np.zeros(n_pairs, dtype=np.int32)
+    row_active = np.zeros(n_pairs, dtype=bool)
+    active_rows = np.flatnonzero(active_mask & (cutoff_idx >= 2))
+    if not active_rows.size:
+        return r_min_indices, row_active
+
+    for L in np.unique(cutoff_idx[active_rows]):
+        L = int(L)
+        if L < 2:
+            continue
+        rows = active_rows[cutoff_idx[active_rows] == L]
+        sub = g_mat[rows, :L]
+        m = len(rows)
+        s_r = min(L, int(max_search_r))
+        if s_r == 0:
+            continue
+
+        argmax_s = np.argmax(sub[:, :s_r], axis=1).astype(np.int32)
+        diffs = np.diff(sub, axis=1)
+        has_zero_diff = np.any(diffs == 0, axis=1)
+
+        if L >= 3:
+            strict_min = (diffs[:, :-1] < 0) & (diffs[:, 1:] > 0)
+            prefix_min = np.minimum.accumulate(sub, axis=1)[:, :-2]
+            suffix_min = np.minimum.accumulate(sub[:, ::-1], axis=1)[:, ::-1][:, 2:]
+            interior_max = (diffs[:, :-1] > 0) & (diffs[:, 1:] <= 0)
+            prom_upper = np.where(interior_max, sub[:, 1:-1] - np.maximum(prefix_min, suffix_min), -1.0)
+            can_prom = np.max(prom_upper, axis=1) >= peak_prominence
+        else:
+            strict_min = np.zeros((m, 0), dtype=bool)
+            can_prom = np.zeros(m, dtype=bool)
+
+        fast_mask = (~can_prom) & (~has_zero_diff)
+        if np.any(fast_mask):
+            f_idx = np.flatnonzero(fast_mask)
+            fp = argmax_s[f_idx]
+
+            # Case A: Interior peak (fp > 0)
+            interior_sel = fp > 0
+            if np.any(interior_sel):
+                fi_int = f_idx[interior_sel]
+                fp_int = fp[interior_sel]
+                if L >= 3:
+                    col_grid = np.arange(L - 2, dtype=np.int32)[None, :]
+                    after_min = strict_min[fi_int] & (col_grid >= fp_int[:, None])
+                    has_m = np.any(after_min, axis=1)
+                    rm = np.where(has_m, np.argmax(after_min, axis=1) + 1, np.minimum(fp_int * 2, L - 1))
+                else:
+                    rm = np.minimum(fp_int * 2, L - 1)
+                rm = np.where(rm <= fp_int, L - 1, rm)
+                rm = np.minimum(rm, L - 1).astype(np.int32)
+                r_min_indices[rows[fi_int]] = rm
+                row_active[rows[fi_int]] = True
+
+            # Case B: Contact peak at r = 1 (fp == 0)
+            contact_sel = (fp == 0) & (sub[f_idx, 0] > 0)
+            if np.any(contact_sel):
+                fi_con = f_idx[contact_sel]
+                if L >= 3:
+                    has_m0 = np.any(strict_min[fi_con], axis=1)
+                    first_m0 = np.argmax(strict_min[fi_con], axis=1) + 1
+                else:
+                    has_m0 = np.zeros(len(fi_con), dtype=bool)
+                    first_m0 = np.ones(len(fi_con), dtype=np.int32)
+                below_u = sub[fi_con, 1:] <= 1.0
+                has_bu = np.any(below_u, axis=1)
+                first_bu = np.argmax(below_u, axis=1) + 1
+                fallback_r = min(4, L - 1)
+                rm0 = np.where(has_m0, first_m0, np.where(has_bu, first_bu, fallback_r))
+                rm0 = np.clip(rm0, 1, L - 1).astype(np.int32)
+                r_min_indices[rows[fi_con]] = rm0
+                row_active[rows[fi_con]] = True
+
+        for k in np.flatnonzero(~fast_mask):
+            g_r = sub[k]
+            peaks, _ = find_peaks(g_r, prominence=peak_prominence) if can_prom[k] else ((), None)
+            if len(peaks) == 0:
+                first_peak_idx = int(argmax_s[k])
+            else:
+                first_peak_idx = int(peaks[0])
+
+            if first_peak_idx == 0:
+                if g_r[0] <= 0:
+                    continue
+                r_min_idx = _resolve_contact_peak_rmin(g_r, L)
+            elif not has_zero_diff[k]:
+                sub_min = strict_min[k, first_peak_idx:]
+                if np.any(sub_min):
+                    r_min_idx = first_peak_idx + int(np.argmax(sub_min)) + 1
+                else:
+                    r_min_idx = min(first_peak_idx * 2, L - 1)
+                    if r_min_idx <= first_peak_idx:
+                        r_min_idx = L - 1
+            else:
+                minima, _ = find_peaks(-g_r[first_peak_idx:])
+                if len(minima) == 0:
+                    r_min_idx = min(first_peak_idx * 2, L - 1)
+                    if r_min_idx <= first_peak_idx:
+                        r_min_idx = L - 1
+                else:
+                    r_min_idx = first_peak_idx + int(minima[0])
+            r_min_idx = min(int(r_min_idx), L - 1)
+            r_min_indices[rows[k]] = r_min_idx
+            row_active[rows[k]] = True
+
+    return r_min_indices, row_active
+
+
 def calculate_glam_coordination_number(rdf_df, num_levels, level_counts, total_roi_voxels):
-    """Calculates the Coordination Number (Z)."""
+    """Calculates the Coordination Number (Z) strictly within each pair's supported
+    radial domain (:L, where L = smoothed.cutoff_idx[row]), vectorized across all pairs.
+    """
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
     peak_prominence = get_config('PeakProminence')
 
     coordination_numbers = {}
-    if rdf_df.empty: return {}
-    r = rdf_df['r'].values
-    
+    if rdf_df.empty or total_roi_voxels <= 0:
+        return {}
+    from .rdf_smoothing import prepare_smoothed_rdf
+    smoothed = prepare_smoothed_rdf(rdf_df, num_levels, savgol_window, savgol_poly)
+    r = smoothed.radius
+    n_r = r.size
+    pairs = smoothed.pairs
+    n_pairs = len(pairs)
+    if not n_pairs or n_r == 0:
+        return coordination_numbers
+
+    raw_mat = smoothed.raw
+    cutoff_idx = smoothed.cutoff_idx
+    col_grid = np.arange(n_r, dtype=np.int32)[None, :]
+    in_sup = col_grid < cutoff_idx[:, None]
+    has_pos = (cutoff_idx >= 2) & np.any(np.where(in_sup, raw_mat, 0.0) > 0, axis=1)
+
+    r_min_indices, row_active = _find_first_shell_minima_cutoff_safe(
+        smoothed.smooth, cutoff_idx, has_pos, 15, peak_prominence
+    )
+    valid_min = r_min_indices >= 1
+    row_active &= valid_min
+
+    # Retain the original per-prefix trapezoidal reduction order.
+    integrals = np.zeros(n_pairs, dtype=np.float64)
+    for idx in np.flatnonzero(row_active):
+        end = int(r_min_indices[idx]) + 1
+        integrand = raw_mat[idx, :end] * (r[:end] ** 2)
+        integrals[idx] = float(np.trapezoid(integrand, r[:end]))
+    rho = np.asarray(level_counts, dtype=np.float64) / float(total_roi_voxels)
+    row_lookup = smoothed.row_index
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
-            coord_key = f'GLAM_CoordNum_{key}'
-            if key not in rdf_df.columns:
+            coord_key = f'GLAM_CoordNum_g_{alpha}_{beta}'
+            row_i = row_lookup.get((alpha, beta))
+            if row_i is not None and row_active[row_i] and rho[beta] > 0:
+                z_val = float(4.0 * np.pi * rho[beta] * integrals[row_i])
+                coordination_numbers[coord_key] = z_val if z_val > 0 else np.nan
+            else:
                 coordination_numbers[coord_key] = np.nan
-                continue
-            
-            g_r_raw = rdf_df[key].values
-
-            if len(g_r_raw) > savgol_window:
-                g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-            else:
-                g_r = g_r_raw.copy() 
-
-            rho_beta = level_counts[beta] / total_roi_voxels if total_roi_voxels > 0 else 0
-            
-            peaks, _ = find_peaks(g_r, prominence=peak_prominence)
-            
-            if len(peaks) == 0:
-                search_r = min(len(g_r), 15) 
-                if search_r == 0:
-                    coordination_numbers[coord_key] = np.nan
-                    continue
-                first_peak_idx = np.argmax(g_r[:search_r])
-                if first_peak_idx == 0: 
-                     coordination_numbers[coord_key] = np.nan
-                     continue
-            else:
-                first_peak_idx = peaks[0] 
-
-            minima, _ = find_peaks(-g_r[first_peak_idx:])
-            
-            if len(minima) == 0:
-                r_min_idx = min(first_peak_idx * 2, len(r) - 1)
-                if r_min_idx <= first_peak_idx: r_min_idx = len(r) - 1
-            else:
-                r_min_idx = first_peak_idx + minima[0] 
-            
-            integrand = g_r_raw[:r_min_idx+1] * r[:r_min_idx+1]**2
-            integral = np.trapezoid(integrand, r[:r_min_idx+1])
-            
-            Z = 4 * np.pi * rho_beta * integral
-            coordination_numbers[coord_key] = Z
     return coordination_numbers
 
+
+
 def calculate_glam_compressibility(rdf_df, num_levels):
-    """
-    Calculates a metric related to Isothermal Compressibility.
-    UPDATED: Restricts integration to the active tumor region.
-    """
+    """Calculates a metric related to Isothermal Compressibility over each state's supported radial domain."""
     compressibility_metrics = {}
-    if rdf_df.empty: return {}
-    r = rdf_df['r'].values
-    
+    if rdf_df.empty:
+        return {}
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r, raw, _, row_index = extract_fast_raw_rdf(rdf_df, num_levels)
+    cutoff_idx = get_row_cutoff_indices(raw, rdf_df)
     for i in range(num_levels):
-        key = f'g_{i}_{i}'
-        comp_key = f'GLAM_Compressibility_{key}'
-        
-        if key in rdf_df.columns:
-            g_r = rdf_df[key].values
-            
-            # Only integrate where the tumor actually exists (g(r) > 0)
-            valid_mask = g_r > 1e-6
-            
-            if np.sum(valid_mask) > 1:
-                r_valid = r[valid_mask]
-                g_r_valid = g_r[valid_mask]
-                
-                integrand = (g_r_valid - 1) * r_valid**2
-                metric = 4 * np.pi * np.trapezoid(integrand, r_valid)
+        comp_key = f'GLAM_Compressibility_g_{i}_{i}'
+        row_i = row_index.get((i, i))
+        if row_i is not None:
+            L = int(cutoff_idx[row_i])
+            if L >= 2 and np.any(raw[row_i, :L] > 1e-6):
+                r_valid = r[:L]
+                g_r_valid = raw[row_i, :L]
+                integrand = (g_r_valid - 1.0) * (r_valid ** 2)
+                metric = float(4.0 * np.pi * np.trapezoid(integrand, r_valid))
             else:
                 metric = 0.0
-
             compressibility_metrics[comp_key] = metric
-            
     return compressibility_metrics
-
-
 
 
 def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
     """
     Calculates anisotropic GLAM features using the gyration tensor.
-    GPU Accelerated using fully vectorized batched tensor covariance.
+    Uses fast vectorized CPU covariance for small local mapping windows (<= 65536 voxels)
+    and batched CuPy covariance for large global volumes.
     """
-    if not HAS_GPU:
+    is_small_window = int(np.prod(image_3d.shape)) <= 65536
+    if not HAS_GPU or is_small_window:
         return _calculate_anisotropic_glam_features_cpu(image_3d, num_levels, cutoff_radius)
 
     anisotropic_features = {}
-    
     coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
     coords_gpu = [cp.array(c, dtype=cp.float32) if len(c) > 0 else None for c in coords]
-    cutoff_sq = cutoff_radius ** 2
-    
+    cutoff_sq = float(cutoff_radius) ** 2
+
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            if coords_gpu[alpha] is None or coords_gpu[beta] is None or len(coords_gpu[beta]) < 10: 
+            if coords_gpu[alpha] is None or coords_gpu[beta] is None or len(coords_gpu[beta]) < 10:
                 anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
                 anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
                 anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
@@ -1044,41 +1249,28 @@ def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
 
             num_ref_points = min(len(coords_gpu[alpha]), 50)
             if len(coords_gpu[alpha]) < num_ref_points:
-                 ref_indices = np.arange(len(coords_gpu[alpha]))
+                ref_indices = np.arange(len(coords_gpu[alpha]))
             else:
-                 ref_indices = np.random.choice(len(coords_gpu[alpha]), num_ref_points, replace=False)
-            
+                ref_indices = np.linspace(0, len(coords_gpu[alpha]) - 1, num_ref_points, dtype=int)
+
             ref_coords_gpu = coords_gpu[alpha][ref_indices]
             target_coords_gpu = coords_gpu[beta]
-            
-            # --- FULLY VECTORIZED GPU BATCHING (No more Python loops!) ---
-            # Broadcasting: (50, 1, 3) - (1, N, 3) -> (50, N, 3)
+
             vectors = target_coords_gpu[cp.newaxis, :, :] - ref_coords_gpu[:, cp.newaxis, :]
-            
-            dist_sq = cp.sum(vectors**2, axis=2) # Shape: (50, N)
-            mask = dist_sq < cutoff_sq # Shape: (50, N)
-            
-            valid_counts = cp.sum(mask, axis=1) # Shape: (50,)
-            valid_refs = valid_counts >= 3 # Minimum 3 neighbors for a 3D covariance
-            
+            dist_sq = cp.sum(vectors ** 2, axis=2)
+            mask = dist_sq < cutoff_sq
+            valid_counts = cp.sum(mask, axis=1)
+            valid_refs = valid_counts >= 3
+
             if cp.any(valid_refs):
-                # Filter down to only reference points with enough neighbors
                 v_counts = valid_counts[valid_refs]
                 masked_vectors = vectors[valid_refs] * mask[valid_refs, :, cp.newaxis]
-                
-                # Calculate Means: Sum / Count -> (V, 3)
                 means = cp.sum(masked_vectors, axis=1) / v_counts[:, cp.newaxis]
-                
-                # Subtract means (center the data)
                 centered = masked_vectors - means[:, cp.newaxis, :]
-                centered *= mask[valid_refs, :, cp.newaxis] # Re-zero the out-of-bounds neighbors
-                
-                # Batched Covariance: (V, 3, N) @ (V, N, 3) -> (V, 3, 3)
+                centered *= mask[valid_refs, :, cp.newaxis]
                 cov_tensors = cp.matmul(centered.transpose(0, 2, 1), centered) / (v_counts[:, cp.newaxis, cp.newaxis] - 1)
-                
-                # Average the valid tensors and bring back to CPU for Eigendecomposition
                 avg_gyration_cpu = cp.mean(cov_tensors, axis=0).get()
-                
+
                 if np.any(np.isnan(avg_gyration_cpu)) or np.any(np.isinf(avg_gyration_cpu)):
                     l1, l2, l3, anisotropy = 0.0, 0.0, 0.0, 0.0
                 else:
@@ -1086,20 +1278,17 @@ def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
                         eigenvalues, _ = np.linalg.eigh(avg_gyration_cpu)
                         eigenvalues = np.sort(eigenvalues)[::-1]
                         l1, l2, l3 = eigenvalues
-                        denom = (l1 + l2 + l3)**2
-                        if denom > 1e-9:
-                            anisotropy = 1 - 3 * (l1*l2 + l2*l3 + l3*l1) / denom
-                        else:
-                            anisotropy = 0.0
+                        denom = (l1 + l2 + l3) ** 2
+                        anisotropy = 1.0 - 3.0 * (l1 * l2 + l2 * l3 + l3 * l1) / denom if denom > 1e-9 else 0.0
                     except np.linalg.LinAlgError:
                         l1, l2, l3, anisotropy = 0.0, 0.0, 0.0, 0.0
             else:
                 l1, l2, l3, anisotropy = 0.0, 0.0, 0.0, 0.0
 
-            anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = anisotropy
-            anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = l1
-            anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = l2
-            anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = l3
+            anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = float(anisotropy)
+            anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = float(l1)
+            anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = float(l2)
+            anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = float(l3)
 
     if HAS_GPU:
         cp.get_default_memory_pool().free_all_blocks()
@@ -1107,115 +1296,214 @@ def calculate_anisotropic_glam_features(image_3d, num_levels, cutoff_radius):
     return anisotropic_features
 
 def _calculate_anisotropic_glam_features_cpu(image_3d, num_levels, cutoff_radius):
-    """Fallback CPU function for anisotropic GLAM features."""
+    """Ultra-fast exact BLAS moment solver for anisotropic GLAM features (gyration tensor).
+    Uses translation invariance of sample covariance and `np.add.reduceat` across reference
+    states to eliminate inner Python loops while preserving exact NaN semantics.
+    """
     anisotropic_features = {}
-    coords = [np.argwhere(image_3d == i) for i in range(num_levels)]
-    
-    for alpha in range(num_levels):
-        for beta in range(num_levels):
-            if len(coords[alpha]) == 0 or len(coords[beta]) < 10: 
-                anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
-                anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
-                anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
-                anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
-                continue
+    is_local_window = int(np.prod(image_3d.shape)) <= 65536
+    absent_default = np.nan if is_local_window else 0.0
 
-            num_ref_points = min(len(coords[alpha]), 50)
-            if len(coords[alpha]) < num_ref_points:
-                 ref_indices = np.arange(len(coords[alpha]))
-            else:
-                 ref_indices = np.random.choice(len(coords[alpha]), num_ref_points, replace=False)
-            
-            avg_gyration_tensor = np.zeros((3, 3))
-            valid_tensors = 0
-            
-            for i in ref_indices:
-                ref_point = coords[alpha][i]
-                vectors = coords[beta] - ref_point
-                distances = np.linalg.norm(vectors, axis=1)
-                neighbors = vectors[distances < cutoff_radius]
-                
-                if len(neighbors) < 3: continue
-                
-                gyration_tensor = np.cov(neighbors, rowvar=False)
-                avg_gyration_tensor += gyration_tensor
-                valid_tensors += 1
-            
-            if valid_tensors > 0:
-                avg_gyration_tensor /= valid_tensors
-                if np.any(np.isnan(avg_gyration_tensor)) or np.any(np.isinf(avg_gyration_tensor)):
-                     l1, l2, l3 = 0.0, 0.0, 0.0
-                     anisotropy = 0.0
-                else:
+    roi_mask = image_3d >= 0
+    if not np.any(roi_mask):
+        for a in range(num_levels):
+            for b in range(num_levels):
+                anisotropic_features[f'GLAM_Anisotropy_{a}_{b}'] = absent_default
+                anisotropic_features[f'GLAM_Eigenvalue1_{a}_{b}'] = absent_default
+                anisotropic_features[f'GLAM_Eigenvalue2_{a}_{b}'] = absent_default
+                anisotropic_features[f'GLAM_Eigenvalue3_{a}_{b}'] = absent_default
+        return anisotropic_features
+
+    all_coords = np.argwhere(roi_mask).astype(np.float64)
+    all_labels = image_3d[roi_mask].astype(np.int32)
+    counts = np.bincount(all_labels, minlength=num_levels)
+    cutoff_sq = float(cutoff_radius) ** 2
+    min_target_pts = 3 if is_local_window else 10
+
+    aniso_mat = np.full((num_levels, num_levels), absent_default, dtype=np.float64)
+    l1_mat = np.full((num_levels, num_levels), absent_default, dtype=np.float64)
+    l2_mat = np.full((num_levels, num_levels), absent_default, dtype=np.float64)
+    l3_mat = np.full((num_levels, num_levels), absent_default, dtype=np.float64)
+
+    active_alphas = [a for a in range(num_levels) if counts[a] > 0]
+    active_betas = [b for b in range(num_levels) if counts[b] >= min_target_pts]
+    if not active_alphas or not active_betas:
+        for a in range(num_levels):
+            for b in range(num_levels):
+                anisotropic_features[f'GLAM_Anisotropy_{a}_{b}'] = float(aniso_mat[a, b])
+                anisotropic_features[f'GLAM_Eigenvalue1_{a}_{b}'] = float(l1_mat[a, b])
+                anisotropic_features[f'GLAM_Eigenvalue2_{a}_{b}'] = float(l2_mat[a, b])
+                anisotropic_features[f'GLAM_Eigenvalue3_{a}_{b}'] = float(l3_mat[a, b])
+        return anisotropic_features
+
+    ref_indices_in_all = []
+    ref_starts = []
+    offset = 0
+    for a in active_alphas:
+        a_idx = np.flatnonzero(all_labels == a)
+        n_a = len(a_idx)
+        n_ref = min(n_a, 50)
+        sel = a_idx if n_a <= n_ref else a_idx[np.linspace(0, n_a - 1, n_ref, dtype=int)]
+        ref_indices_in_all.append(sel)
+        ref_starts.append(offset)
+        offset += n_ref
+
+    ref_idx_vec = np.concatenate(ref_indices_in_all)
+    ref_starts = np.asarray(ref_starts, dtype=np.intp)
+    ref_pts = all_coords[ref_idx_vec]
+
+    beta_arr = np.asarray(active_betas, dtype=np.int32)
+    beta_mask = np.isin(all_labels, beta_arr)
+    tgt_pts_unsorted = all_coords[beta_mask]
+    tgt_lbl_unsorted = all_labels[beta_mask]
+    order_b = np.argsort(tgt_lbl_unsorted, kind='mergesort')
+    tgt_pts = tgt_pts_unsorted[order_b]
+    tgt_labels = tgt_lbl_unsorted[order_b]
+    tgt_orig_idx = np.flatnonzero(beta_mask)[order_b]
+
+    r_n2 = np.sum(ref_pts * ref_pts, axis=1, keepdims=True)
+    t_n2 = np.sum(tgt_pts * tgt_pts, axis=1, keepdims=True).T
+    d2 = r_n2 + t_n2 - 2.0 * (ref_pts @ tgt_pts.T)
+    adj_all = d2 < (cutoff_sq - 1e-12)
+    adj_all &= ~(ref_idx_vec[:, None] == tgt_orig_idx[None, :])
+
+    z, y, x = tgt_pts[:, 0], tgt_pts[:, 1], tgt_pts[:, 2]
+    moments_tgt = np.column_stack((
+        np.ones(len(tgt_pts), dtype=np.float64),
+        z, y, x,
+        z * z, y * y, x * x,
+        z * y, z * x, y * x,
+    ))
+
+    b_changes = np.flatnonzero(np.diff(tgt_labels) != 0) + 1
+    b_starts = np.concatenate(([0], b_changes))
+    b_ends = np.concatenate((b_changes, [len(tgt_labels)]))
+    n_B = len(active_betas)
+    m_ref_tot = len(ref_idx_vec)
+
+    sums_all = np.empty((m_ref_tot, n_B, 10), dtype=np.float64)
+    for bi, (bs, be) in enumerate(zip(b_starts, b_ends)):
+        sums_all[:, bi, :] = adj_all[:, bs:be].astype(np.float64) @ moments_tgt[bs:be]
+
+    cnt = sums_all[:, :, 0]
+    valid_r = cnt >= 3.0
+    inv_n = np.where(valid_r, 1.0 / np.maximum(cnt, 1.0), 0.0)
+    inv_nm1 = np.where(valid_r, 1.0 / np.maximum(cnt - 1.0, 1.0), 0.0)
+
+    sz, sy, sx = sums_all[:, :, 1], sums_all[:, :, 2], sums_all[:, :, 3]
+    cov_6 = np.empty((m_ref_tot, n_B, 6), dtype=np.float64)
+    cov_6[:, :, 0] = (sums_all[:, :, 4] - sz * sz * inv_n) * inv_nm1
+    cov_6[:, :, 1] = (sums_all[:, :, 5] - sy * sy * inv_n) * inv_nm1
+    cov_6[:, :, 2] = (sums_all[:, :, 6] - sx * sx * inv_n) * inv_nm1
+    cov_6[:, :, 3] = (sums_all[:, :, 7] - sz * sy * inv_n) * inv_nm1
+    cov_6[:, :, 4] = (sums_all[:, :, 8] - sz * sx * inv_n) * inv_nm1
+    cov_6[:, :, 5] = (sums_all[:, :, 9] - sy * sx * inv_n) * inv_nm1
+    cov_6[~valid_r] = 0.0
+
+    valid_cnt_ab = np.add.reduceat(valid_r.astype(np.int32), ref_starts, axis=0)
+    cov_sum_ab = np.add.reduceat(cov_6, ref_starts, axis=0)
+
+    active_ab = valid_cnt_ab > 0
+    if np.any(active_ab):
+        ai_idx, bi_idx = np.nonzero(active_ab)
+        mean_cov = cov_sum_ab[ai_idx, bi_idx] / valid_cnt_ab[ai_idx, bi_idx, None]
+        finite_row = np.all(np.isfinite(mean_cov), axis=1)
+        ai_idx = ai_idx[finite_row]
+        bi_idx = bi_idx[finite_row]
+        mean_cov = mean_cov[finite_row]
+
+        if len(mean_cov):
+            K = len(mean_cov)
+            gyr_stack = np.empty((K, 3, 3), dtype=np.float64)
+            gyr_stack[:, 0, 0] = mean_cov[:, 0]
+            gyr_stack[:, 1, 1] = mean_cov[:, 1]
+            gyr_stack[:, 2, 2] = mean_cov[:, 2]
+            gyr_stack[:, 0, 1] = gyr_stack[:, 1, 0] = mean_cov[:, 3]
+            gyr_stack[:, 0, 2] = gyr_stack[:, 2, 0] = mean_cov[:, 4]
+            gyr_stack[:, 1, 2] = gyr_stack[:, 2, 1] = mean_cov[:, 5]
+
+            try:
+                eig_all = np.linalg.eigvalsh(gyr_stack)[:, ::-1]
+            except np.linalg.LinAlgError:
+                eig_all = np.full((K, 3), absent_default, dtype=np.float64)
+                for idx_g, g_m in enumerate(gyr_stack):
                     try:
-                        eigenvalues, _ = np.linalg.eigh(avg_gyration_tensor)
-                        eigenvalues = np.sort(eigenvalues)[::-1]
-                        l1, l2, l3 = eigenvalues
-                        
-                        denom = (l1 + l2 + l3)**2
-                        if denom > 1e-9:
-                            anisotropy = 1 - 3 * (l1*l2 + l2*l3 + l3*l1) / denom
-                        else:
-                            anisotropy = 0.0
+                        eig_all[idx_g] = np.linalg.eigvalsh(g_m)[::-1]
                     except np.linalg.LinAlgError:
-                        l1, l2, l3 = 0.0, 0.0, 0.0
-                        anisotropy = 0.0
+                        pass
 
-                anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = anisotropy
-                anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = l1
-                anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = l2
-                anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = l3
-            
-            else:
-                anisotropic_features[f'GLAM_Anisotropy_{alpha}_{beta}'] = 0.0
-                anisotropic_features[f'GLAM_Eigenvalue1_{alpha}_{beta}'] = 0.0
-                anisotropic_features[f'GLAM_Eigenvalue2_{alpha}_{beta}'] = 0.0
-                anisotropic_features[f'GLAM_Eigenvalue3_{alpha}_{beta}'] = 0.0
+            l1_v, l2_v, l3_v = eig_all[:, 0], eig_all[:, 1], eig_all[:, 2]
+            denom_v = (l1_v + l2_v + l3_v) ** 2
+            aniso_v = np.where(
+                denom_v > 1e-9,
+                1.0 - 3.0 * (l1_v * l2_v + l2_v * l3_v + l3_v * l1_v) / np.maximum(denom_v, 1e-300),
+                absent_default,
+            )
+            if is_local_window:
+                invalid_tensor = (~np.all(np.isfinite(eig_all), axis=1)) | (denom_v <= 1e-9)
+                aniso_v[invalid_tensor] = np.nan
+                l1_v[invalid_tensor] = np.nan
+                l2_v[invalid_tensor] = np.nan
+                l3_v[invalid_tensor] = np.nan
+
+            a_orig = np.asarray(active_alphas, dtype=np.intp)[ai_idx]
+            b_orig = np.asarray(active_betas, dtype=np.intp)[bi_idx]
+            aniso_mat[a_orig, b_orig] = aniso_v
+            l1_mat[a_orig, b_orig] = l1_v
+            l2_mat[a_orig, b_orig] = l2_v
+            l3_mat[a_orig, b_orig] = l3_v
+
+    for a in range(num_levels):
+        for b in range(num_levels):
+            anisotropic_features[f'GLAM_Anisotropy_{a}_{b}'] = float(aniso_mat[a, b])
+            anisotropic_features[f'GLAM_Eigenvalue1_{a}_{b}'] = float(l1_mat[a, b])
+            anisotropic_features[f'GLAM_Eigenvalue2_{a}_{b}'] = float(l2_mat[a, b])
+            anisotropic_features[f'GLAM_Eigenvalue3_{a}_{b}'] = float(l3_mat[a, b])
 
     return anisotropic_features
+
+
 
 
 def calculate_glam_fractal_dimension(image_3d, num_levels):
     """
     Calculates Volume and Interface Fractal Dimensions.
-    GPU Accelerated using CuPy NDImage maximum_filter.
+    Uses GPU acceleration for large global volumes and fast batched 3D integral
+    box-counting for small local mapping windows without per-voxel console spam.
     """
-    if not HAS_GPU:
-        return _calculate_glam_fractal_dimension_cpu(image_3d, num_levels)
-        
+    is_small_window = int(np.prod(image_3d.shape)) <= 65536
+    if not HAS_GPU or is_small_window:
+        return _calculate_glam_fractal_dimension_cpu(image_3d, num_levels, verbose=not is_small_window)
+
     import cupyx.scipy.ndimage as cupy_ndimage
     print("  - Starting Fractal Dimension analysis (GPU Accelerated)...")
     fractal_dimensions = {}
-    
+
     image_gpu = cp.array(image_3d, dtype=cp.int16)
     masks_gpu = {i: (image_gpu == i) for i in range(num_levels)}
-    
+
     def boxcount_gpu(binary_mask_gpu):
-        if not cp.any(binary_mask_gpu): return 0.0
-        
+        if not cp.any(binary_mask_gpu):
+            return 0.0
         p = binary_mask_gpu.shape
         scales = np.logspace(np.log2(2), np.log2(min(p)), num=8, base=2.0, dtype=np.int32)
         scales = np.unique(scales[scales > 1])
-        
-        if len(scales) < 2: return 0.0
-        
+        if len(scales) < 2:
+            return 0.0
         counts = []
         for s in scales:
-            # 3D Max pooling natively on GPU
             s = int(s)
             filtered = cupy_ndimage.maximum_filter(binary_mask_gpu, size=s, mode='constant')
             count = cp.sum(filtered[::s, ::s, ::s])
             counts.append(float(count))
-            
         counts = np.array(counts)
         valid_indices = counts > 0
-        if np.sum(valid_indices) < 2: return 0.0
-        
+        if np.sum(valid_indices) < 2:
+            return 0.0
         scales_fit = scales[valid_indices]
         counts_fit = counts[valid_indices]
-        
         try:
-            with np.errstate(divide='ignore'): 
+            with np.errstate(divide='ignore'):
                 coeffs = np.polyfit(np.log(scales_fit), np.log(counts_fit), 1)
             return -coeffs[0]
         except np.linalg.LinAlgError:
@@ -1227,59 +1515,170 @@ def calculate_glam_fractal_dimension(image_3d, num_levels):
     for i in range(num_levels):
         if not cp.any(masks_gpu[i]):
             for j in range(num_levels):
-                if i != j: fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
+                if i != j:
+                    fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
             continue
-            
         dilated_i_gpu = cupy_ndimage.binary_dilation(masks_gpu[i])
-        
         for j in range(num_levels):
-            if i == j: continue
+            if i == j:
+                continue
             if not cp.any(masks_gpu[j]):
                 fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
                 continue
-                
             interface_gpu = dilated_i_gpu & masks_gpu[j]
             fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = boxcount_gpu(interface_gpu)
 
     del image_gpu
     del masks_gpu
     cp.get_default_memory_pool().free_all_blocks()
-    
     return fractal_dimensions
 
-def _calculate_glam_fractal_dimension_cpu(image_3d, num_levels):
-    """Fallback CPU function for Fractal Dimension."""
-    print("  - Starting Fractal Dimension analysis (CPU)...")
-    fractal_dimensions = {}
 
-    def boxcount(binary_image, max_box_size=32):
-        if not np.any(binary_image): return 0.0
-        p = binary_image.shape
-        scales = np.logspace(np.log2(2), np.log2(min(p)), num=8, base=2.0, dtype=np.int32)
-        scales = np.unique(scales[scales > 1])
-        if len(scales) < 2: return 0.0
+def _calculate_glam_fractal_dimension_cpu(image_3d, num_levels, verbose=True):
+    """Bitpacked 3D box-counting for local mapping windows (<= 32 gray levels)
+    and standard fallback for global volumes.
+    """
+    if verbose:
+        print("  - Starting Fractal Dimension analysis (CPU)...")
+    fractal_dimensions = {}
+    p = image_3d.shape
+    min_dim = min(p)
+    scales = np.logspace(np.log2(2), np.log2(max(min_dim, 2)), num=8, base=2.0, dtype=np.int32)
+    scales = np.unique(scales[scales > 1])
+
+    if len(scales) < 2:
+        for i in range(num_levels):
+            fractal_dimensions[f'GLAM_VolumeFD_{i}'] = 0.0
+            for j in range(num_levels):
+                if i != j:
+                    fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
+        return fractal_dimensions
+
+    # Fast bitpacked box-counting when num_levels <= 32 and window <= 65536 voxels:
+    # Pack all num_levels dilated masks into a single uint32 3D volume D_bits where
+    # bit i is 1 iff dilated[i][z, y, x] is True.
+    if int(np.prod(p)) <= 65536 and num_levels <= 32:
+        dz, dy, dx = p
+        roi_vals = image_3d[image_3d >= 0]
+        if not roi_vals.size:
+            for i in range(num_levels):
+                fractal_dimensions[f'GLAM_VolumeFD_{i}'] = 0.0
+                for j in range(num_levels):
+                    if i != j:
+                        fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
+            return fractal_dimensions
+
+        # Build single uint32 bitmask of labels: (1 << label) at each in-mask voxel
+        label_bits = np.where(
+            image_3d >= 0,
+            np.left_shift(np.uint32(1), np.clip(image_3d, 0, 31).astype(np.uint32)),
+            np.uint32(0),
+        )
+        # 6-connected dilation of all gray levels simultaneously in uint32!
+        d_bits = label_bits.copy()
+        d_bits[1:, :, :] |= label_bits[:-1, :, :]
+        d_bits[:-1, :, :] |= label_bits[1:, :, :]
+        d_bits[:, 1:, :] |= label_bits[:, :-1, :]
+        d_bits[:, :-1, :] |= label_bits[:, 1:, :]
+        d_bits[:, :, 1:] |= label_bits[:, :, :-1]
+        d_bits[:, :, :-1] |= label_bits[:, :, 1:]
+
+        present_j = np.flatnonzero(np.bincount(roi_vals.astype(int), minlength=num_levels) > 0)
+        n_pres = len(present_j)
+        # W_bits[idx_j, z, y, x] holds d_bits where image_3d == j, else 0
+        w_bits = np.where(
+            image_3d[None, :, :, :] == present_j[:, None, None, None],
+            d_bits[None, :, :, :],
+            np.uint32(0),
+        )
+
+        bit_shifts = np.arange(num_levels, dtype=np.uint32)[:, None]
+        # counts_mat has shape (num_levels, n_pres, len(scales)) where [i, idx_j, s]
+        # is the box count for (VolumeFD_j when i == j, InterfaceFD_i_j when i != j)
+        counts_mat = np.zeros((num_levels, n_pres, len(scales)), dtype=np.float64)
+
+        for s_idx, s in enumerate(scales):
+            s = int(s)
+            half = s // 2
+            z0 = np.clip(np.arange(0, dz, s) - s + 1 + half, 0, dz)
+            z_end = int(np.clip((len(z0) - 1) * s + half + 1, 0, dz))
+            y0 = np.clip(np.arange(0, dy, s) - s + 1 + half, 0, dy)
+            y_end = int(np.clip((len(y0) - 1) * s + half + 1, 0, dy))
+            x0 = np.clip(np.arange(0, dx, s) - s + 1 + half, 0, dx)
+            x_end = int(np.clip((len(x0) - 1) * s + half + 1, 0, dx))
+
+            sub = w_bits[:, :z_end, :y_end, :x_end]
+            rz = np.bitwise_or.reduceat(sub, z0, axis=1)
+            ry = np.bitwise_or.reduceat(rz, y0, axis=2)
+            box_or = np.bitwise_or.reduceat(ry, x0, axis=3).reshape(n_pres, -1)  # (n_pres, N_boxes)
+
+            # Unpack bits 0..num_levels-1 and count active boxes per (i, idx_j)
+            active_bits = ((box_or[None, :, :] >> bit_shifts[:, None, :]) & np.uint32(1)) != 0
+            counts_mat[:, :, s_idx] = np.sum(active_bits, axis=2)
+
+        counts_flat = counts_mat.reshape(num_levels * n_pres, len(scales))
+        log_scales = np.log(scales.astype(np.float64))
+        valid = counts_flat > 0
+        n_valid = np.sum(valid, axis=1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_counts = np.where(valid, np.log(np.maximum(counts_flat, 1.0)), 0.0)
+
+        x_val = np.where(valid, log_scales[None, :], 0.0)
+        x_mean = np.sum(x_val, axis=1, keepdims=True) / np.maximum(n_valid[:, None], 1)
+        y_mean = np.sum(log_counts, axis=1, keepdims=True) / np.maximum(n_valid[:, None], 1)
+        dx_mat = np.where(valid, log_scales[None, :] - x_mean, 0.0)
+        dy_mat = np.where(valid, log_counts - y_mean, 0.0)
+        denom = np.sum(dx_mat * dx_mat, axis=1)
+        slopes = np.where(
+            (n_valid >= 2) & (denom > 1e-12),
+            -np.sum(dx_mat * dy_mat, axis=1) / np.maximum(denom, 1e-300),
+            0.0,
+        ).reshape(num_levels, n_pres)
+
+        # Initialize absent gray levels to np.nan; present pairs with no contact stay 0.0
+        for i in range(num_levels):
+            fractal_dimensions[f'GLAM_VolumeFD_{i}'] = np.nan
+            for j in range(num_levels):
+                if i != j:
+                    fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = np.nan
+
+        for idx_j, j in enumerate(present_j):
+            j = int(j)
+            fractal_dimensions[f'GLAM_VolumeFD_{j}'] = float(slopes[j, idx_j])
+            for idx_i, i in enumerate(present_j):
+                i = int(i)
+                if i != j:
+                    fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = float(slopes[i, idx_j])
+        return fractal_dimensions
+
+    # Standard fallback for large global volumes on CPU
+    def boxcount(binary_image):
+        if not np.any(binary_image):
+            return 0.0
         counts = np.array([np.sum(ndimage.maximum_filter(binary_image, size=s, mode='constant')[::s, ::s, ::s]) for s in scales])
         valid_indices = counts > 0
-        if np.sum(valid_indices) < 2: return 0.0 
+        if np.sum(valid_indices) < 2:
+            return 0.0
         scales_fit = scales[valid_indices]
         counts_fit = counts[valid_indices]
         try:
-            with np.errstate(divide='ignore'): 
+            with np.errstate(divide='ignore'):
                 coeffs = np.polyfit(np.log(scales_fit), np.log(counts_fit), 1)
             return -coeffs[0]
         except np.linalg.LinAlgError:
             return 0.0
-        
+
     for i in range(num_levels):
         binary_image = (image_3d == i)
         fractal_dimensions[f'GLAM_VolumeFD_{i}'] = boxcount(binary_image)
 
     for i in range(num_levels):
         for j in range(num_levels):
-            if i == j: continue
+            if i == j:
+                continue
             mask_i = (image_3d == i)
             mask_j = (image_3d == j)
-            if not np.any(mask_i) or not np.any(mask_j): 
+            if not np.any(mask_i) or not np.any(mask_j):
                 fractal_dimensions[f'GLAM_InterfaceFD_{i}_{j}'] = 0.0
                 continue
             interface = ndimage.binary_dilation(mask_i) & mask_j
@@ -1643,69 +2042,92 @@ def _calculate_glam_topology_cpu(image_3d, num_levels):
 
 
 def calculate_glam_potential_energy(rdf_df, num_levels):
-    """Calculates the Potential of Mean Force (PMF) Energy (U*) and contributions."""
+    """Calculates the Potential of Mean Force (PMF) Energy (U*) strictly over each pair's
+    supported radial domain (eliminating the half-trapezoid step artifact at R_cutoff).
+    """
     potential_energies = {}
-    if rdf_df.empty: return {}
-    r = rdf_df['r'].values
-    
+    if rdf_df.empty:
+        return {}
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r, g_mat, pairs, row_index = extract_fast_raw_rdf(rdf_df, num_levels)
+    if not pairs:
+        return potential_energies
+
+    cutoff_idx = get_row_cutoff_indices(g_mat, rdf_df)
+    energies = np.full(len(pairs), np.nan, dtype=np.float64)
+
+    for L in np.unique(cutoff_idx):
+        L = int(L)
+        if L < 2:
+            continue
+        rows = np.flatnonzero(cutoff_idx == L)
+        r_sub = r[:L]
+        g_sub = g_mat[rows, :L]
+        pmf = -np.log(g_sub + 1e-9)
+        integrand = pmf * g_sub * (r_sub[None, :] ** 2)
+        energies[rows] = 4.0 * np.pi * np.trapezoid(integrand, r_sub, axis=-1)
+
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
-            if key in rdf_df.columns:
-                g_r = rdf_df[key].values
-                pmf = -np.log(g_r + 1e-9) # W*(r)
-                integrand = pmf * g_r * r**2
-                energy = 4 * np.pi * np.trapezoid(integrand, r)
-                potential_energies[f'GLAM_PotentialEnergy_{alpha}_{beta}'] = energy
+            idx = row_index.get((alpha, beta))
+            val = float(energies[idx]) if idx is not None and np.isfinite(energies[idx]) else np.nan
+            potential_energies[f'GLAM_PotentialEnergy_{alpha}_{beta}'] = val
     return potential_energies
 
+
 def calculate_glam_structural_pressure_index(rdf_df, num_levels, level_counts, total_roi_voxels):
-    """Calculates the Structural Pressure Index (SPI), formally analogous to the interaction component of pressure."""
-    # --- Get config params ---
+    """Calculates the Structural Pressure Index (SPI) strictly inside each pair's supported domain."""
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
-    # ---
 
     spi_metrics = {}
-    if rdf_df.empty or total_roi_voxels == 0: return {}
-    r = rdf_df['r'].values
-    if r.size < 2: return {}
+    if rdf_df.empty or total_roi_voxels == 0:
+        return {}
+    from .rdf_smoothing import prepare_smoothed_rdf
+    smoothed = prepare_smoothed_rdf(rdf_df, num_levels, savgol_window, savgol_poly)
+    r = smoothed.radius
+    if r.size < 2:
+        return {}
 
+    n_pairs = len(smoothed.pairs)
+    integrals = np.zeros(n_pairs, dtype=np.float64)
+    if n_pairs:
+        g_raw = smoothed.raw
+        g_smooth = smoothed.smooth
+        cutoff_idx = smoothed.cutoff_idx
+        for L in np.unique(cutoff_idx):
+            L = int(L)
+            if L < 2:
+                continue
+            rows = np.flatnonzero(cutoff_idx == L)
+            r_sub = r[:L]
+            raw_sub = g_raw[rows, :L]
+            sm_sub = np.maximum(g_smooth[rows, :L], 1e-9)
+            pmf_sub = -np.log(sm_sub)
+            edge_ord = 2 if L >= 3 else 1
+            dW_dr = np.gradient(pmf_sub, r_sub, axis=-1, edge_order=edge_ord)
+            integrand = (r_sub[None, :] ** 3) * dW_dr * raw_sub
+            integrals[rows] = np.trapezoid(integrand, r_sub, axis=-1)
+
+    rho = np.asarray(level_counts, dtype=np.float64) / float(total_roi_voxels)
     for alpha in range(num_levels):
-        rho_alpha = level_counts[alpha] / total_roi_voxels
+        rho_alpha = rho[alpha]
         for beta in range(num_levels):
-            rho_beta = level_counts[beta] / total_roi_voxels
-            key = f'g_{alpha}_{beta}'
-            
-            if key in rdf_df.columns:
-                g_r_raw = rdf_df[key].values
-
-                if len(g_r_raw) > savgol_window:
-                    g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-                else:
-                    g_r = g_r_raw.copy()
-                
-                g_r[g_r <= 1e-9] = 1e-9 
-                
-                pmf = -np.log(g_r) 
-                
-                dW_dr = np.gradient(pmf, r, edge_order=2)
-                
-                integrand = r * dW_dr * g_r_raw * r**2
-                
-                integral = np.trapezoid(integrand, r)
-                
-                index_val = - (rho_alpha * rho_beta / 6.0) * 4 * np.pi * integral
-                spi_metrics[f'GLAM_StructuralPressureIndex_{alpha}_{beta}'] = index_val
+            row_idx = smoothed.row_index.get((alpha, beta))
+            if row_idx is not None and smoothed.cutoff_idx[row_idx] >= 2 and rho_alpha > 0 and rho[beta] > 0:
+                val = -(rho_alpha * rho[beta] / 6.0) * 4.0 * np.pi * integrals[row_idx]
+                spi_metrics[f'GLAM_StructuralPressureIndex_{alpha}_{beta}'] = float(val)
             else:
                 spi_metrics[f'GLAM_StructuralPressureIndex_{alpha}_{beta}'] = np.nan
-                
     return spi_metrics
 
+
 def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, num_levels):
-    """Calculates the Configurational Disorder Index (formerly Effective Structural Temperature)
-       averaged over the first coordination shell."""
-    # --- Get config params ---
+    """Calculates the Configurational Disorder Index strictly over the common supported
+    radial domain `L = min(cutoff_s, cutoff_r)` using vectorized first-shell detection,
+    with positive-shell guards (preventing empty/undershot Savitzky-Golay shells from
+    injecting log(1e-9) = -20.72 spikes) and Tikhonov damping when g_s(r) -> g_r(r).
+    """
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
     peak_prominence = get_config('PeakProminence')
@@ -1714,83 +2136,108 @@ def calculate_configurational_disorder_index(rdf_structured_df, rdf_random_df, n
         max_shell_radius = int(get_config('MaxLocalShellRadius'))
     except Exception:
         max_shell_radius = 30
-        
+
     config_disorder_indices = {}
-    if rdf_structured_df.empty or rdf_random_df.empty: return config_disorder_indices
-    r = rdf_structured_df['r'].values
-    
+    if rdf_structured_df.empty or rdf_random_df.empty:
+        return config_disorder_indices
+    from .rdf_smoothing import prepare_smoothed_rdf
+    _cdi_struct_smoothing = prepare_smoothed_rdf(rdf_structured_df, num_levels, savgol_window, savgol_poly)
+    _cdi_rand_smoothing = prepare_smoothed_rdf(rdf_random_df, num_levels, savgol_window, savgol_poly)
+    if not np.array_equal(_cdi_struct_smoothing.radius, _cdi_rand_smoothing.radius):
+        raise ValueError('Structured and baseline RDF radius grids differ')
+
+    r = _cdi_struct_smoothing.radius
+    n_r = r.size
+    pairs = _cdi_struct_smoothing.pairs
+    n_pairs = len(pairs)
+    if not n_pairs:
+        return config_disorder_indices
+
+    struct_raw = _cdi_struct_smoothing.raw
+    struct_smooth = _cdi_struct_smoothing.smooth
+    cutoff_s = _cdi_struct_smoothing.cutoff_idx
+
+    rand_raw = _cdi_rand_smoothing.raw
+    rand_smooth = _cdi_rand_smoothing.smooth
+    cutoff_r = _cdi_rand_smoothing.cutoff_idx
+
+    if _cdi_rand_smoothing.pairs != pairs:
+        r_map = _cdi_rand_smoothing.row_index
+        rand_raw_aligned = np.full_like(struct_raw, np.nan)
+        rand_smooth_aligned = np.full_like(struct_smooth, np.nan)
+        cutoff_r_aligned = np.zeros(n_pairs, dtype=np.int32)
+        valid_pair_row = np.zeros(n_pairs, dtype=bool)
+        for i, p in enumerate(pairs):
+            if p in r_map:
+                ri = r_map[p]
+                rand_raw_aligned[i] = rand_raw[ri]
+                rand_smooth_aligned[i] = rand_smooth[ri]
+                cutoff_r_aligned[i] = cutoff_r[ri]
+                valid_pair_row[i] = True
+        rand_raw = rand_raw_aligned
+        rand_smooth = rand_smooth_aligned
+        cutoff_r = cutoff_r_aligned
+    else:
+        valid_pair_row = np.ones(n_pairs, dtype=bool)
+
+    common_cutoff = np.minimum(cutoff_s, cutoff_r)
+    col_grid = np.arange(n_r, dtype=np.int32)[None, :]
+    in_common = col_grid < common_cutoff[:, None]
+    has_both_pos = (
+        valid_pair_row
+        & (common_cutoff >= 2)
+        & np.any(np.where(in_common, struct_raw, 0.0) > 1e-6, axis=1)
+        & np.any(np.where(in_common, rand_raw, 0.0) > 1e-6, axis=1)
+    )
+
+    r_min_indices, row_active = _find_first_shell_minima_cutoff_safe(
+        struct_smooth, common_cutoff, has_both_pos, max_shell_radius, peak_prominence
+    )
+    r_min_indices = np.where(row_active & (r_min_indices == 0), 1, r_min_indices)
+
+    # Require both raw and smoothed curves to be strictly positive inside the first shell
+    # so empty shells (g=0) or Savitzky-Golay negative undershoots never inject log(1e-9) = -20.72
+    pos_shell = (
+        (struct_raw > 1e-6)
+        & (rand_raw > 1e-6)
+        & (struct_smooth > 1e-3)
+        & (rand_smooth > 1e-3)
+    )
+    in_shell_mask = row_active[:, None] & (col_grid < r_min_indices[:, None]) & in_common & pos_shell
+    has_valid_shell = np.any(in_shell_mask, axis=1)
+    row_active &= has_valid_shell
+
+    log_struct = np.where(in_shell_mask, np.log(np.maximum(struct_smooth, 1e-3)), 0.0)
+    log_rand = np.where(in_shell_mask, np.log(np.maximum(rand_smooth, 1e-3)), 0.0)
+    log_diff = log_struct - log_rand
+
+    # Tikhonov-damped reciprocal `log_diff / (log_diff^2 + 1e-2)` prevents 1/0 explosion
+    # when g_struct(r) is nearly identical to g_rand(r)
+    damped_inv_diff = log_diff / (log_diff * log_diff + 1e-2)
+    disorder_mat = log_struct * damped_inv_diff
+
+    in_shell = in_shell_mask & np.isfinite(disorder_mat)
+    safe_disorder = np.where(in_shell, disorder_mat, 0.0)
+    weights = np.where(in_shell, np.abs(log_diff), 0.0)
+    weighted_sum = np.sum(safe_disorder * weights, axis=1)
+    weight_totals = np.sum(weights, axis=1)
+    cdi_values = np.where(
+        row_active,
+        np.where(weight_totals > 1e-6, weighted_sum / np.maximum(weight_totals, 1e-300), 0.0),
+        np.nan,
+    )
+
+    row_lookup = _cdi_struct_smoothing.row_index
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
-            index_key = f'GLAM_ConfigurationalDisorderIndex_{alpha}_{beta}'
-            
-            if key not in rdf_structured_df.columns or key not in rdf_random_df.columns:
-                config_disorder_indices[index_key] = np.nan
-                continue
+            row_i = row_lookup.get((alpha, beta))
+            val = float(cdi_values[row_i]) if row_i is not None else np.nan
+            config_disorder_indices[f'GLAM_ConfigurationalDisorderIndex_{alpha}_{beta}'] = val
 
-            g_struct_raw, g_rand_raw = rdf_structured_df[key].values, rdf_random_df[key].values
-            
-            if len(g_struct_raw) > savgol_window:
-                g_struct = savgol_filter(g_struct_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-                g_rand = savgol_filter(g_rand_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-            else:
-                g_struct, g_rand = g_struct_raw, g_rand_raw
-
-            try:
-                peaks, _ = find_peaks(g_struct, prominence=peak_prominence)
-                
-                if len(peaks) == 0:
-                    search_r = min(len(g_struct), max_shell_radius)
-                    if search_r == 0: raise ValueError("Not enough data")
-                    first_peak_idx = np.argmax(g_struct[:search_r])
-                    if first_peak_idx == 0: raise ValueError("Peak at r=1, no clear shell")
-                else:
-                    first_peak_idx = peaks[0] 
-
-                minima, _ = find_peaks(-g_struct[first_peak_idx:])
-                
-                if len(minima) == 0:
-                    r_min_idx = min(first_peak_idx * 2, len(r) - 1)
-                    if r_min_idx <= first_peak_idx: r_min_idx = len(r) - 1
-                else:
-                    r_min_idx = first_peak_idx + minima[0] 
-
-                if r_min_idx == 0: r_min_idx = 1 
-
-                g_s_shell = g_struct[:r_min_idx].copy()
-                g_r_shell = g_rand[:r_min_idx].copy()
-
-                g_s_shell[g_s_shell <= 1e-9] = 1e-9
-                g_r_shell[g_r_shell <= 1e-9] = 1e-9
-                
-                log_g_struct = np.log(g_s_shell)
-                log_g_rand = np.log(g_r_shell)
-                
-                log_diff = log_g_struct - log_g_rand
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    disorder_idx = log_g_struct / log_diff
-                
-                finite_mask = np.isfinite(disorder_idx)
-                finite_disorder_idx = disorder_idx[finite_mask]
-                
-                if finite_disorder_idx.size > 0:
-                    # Weight the average by the absolute structural difference
-                    # This mathematically assigns a weight of 0 to asymptotic noise
-                    weights = np.abs(log_diff[finite_mask])
-                    
-                    if np.sum(weights) > 1e-9:
-                        config_disorder_indices[index_key] = np.average(finite_disorder_idx, weights=weights)
-                    else:
-                        config_disorder_indices[index_key] = np.nan
-                    # -------------------------------------------
-                else:
-                    config_disorder_indices[index_key] = np.nan
-                    
-            except Exception as e:
-                config_disorder_indices[index_key] = np.nan
-                
     return config_disorder_indices
+
+
+
 
 def calculate_nematic_order_parameter(image_array, mask_array):
     """Calculates the GLOBAL Nematic Order Parameter (S) from the intensity gradient."""
@@ -1864,7 +2311,7 @@ def calculate_local_nematic_alignment(image_array, mask_array, cutoff_radius):
     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
     
     num_ref_points = min(len(roi_coords), 200)
-    ref_indices = np.random.choice(len(roi_coords), num_ref_points, replace=False)
+    ref_indices = np.linspace(0, len(roi_coords) - 1, num_ref_points, dtype=int)
     
     # Move to GPU
     coords_gpu = cp.array(roi_coords, dtype=cp.float32)
@@ -1948,7 +2395,7 @@ def _calculate_local_nematic_alignment_cpu(image_array, mask_array, cutoff_radiu
     grad_vectors = grad[:, roi_coords[:, 0], roi_coords[:, 1], roi_coords[:, 2]].T
     tree = cKDTree(roi_coords)
     num_ref_points = min(len(roi_coords), 200)
-    ref_indices = np.random.choice(len(roi_coords), num_ref_points, replace=False)
+    ref_indices = np.linspace(0, len(roi_coords) - 1, num_ref_points, dtype=int)
     
     local_directors = {}
     for i in ref_indices:
@@ -2074,7 +2521,7 @@ def calculate_orientational_correlation_length(image_array, mask_array, max_radi
 
     # Sample reference points
     num_ref_points = min(len(coords), 500)
-    ref_indices = np.random.choice(len(coords), num_ref_points, replace=False)
+    ref_indices = np.linspace(0, len(coords) - 1, num_ref_points, dtype=int)
     
     # 2. Move active data to GPU
     coords_gpu = cp.array(coords, dtype=cp.float32)
@@ -2184,7 +2631,7 @@ def _calculate_orientational_correlation_length_cpu(image_array, mask_array, max
     coords, vectors = roi_coords[valid_indices], grad_vectors[valid_indices] / norms[valid_indices, np.newaxis]
     tree = cKDTree(coords)
     num_ref_points = min(len(coords), 500)
-    ref_indices = np.random.choice(len(coords), num_ref_points, replace=False)
+    ref_indices = np.linspace(0, len(coords) - 1, num_ref_points, dtype=int)
 
     g2_r_bins = np.zeros(max_radius, dtype=np.float64)
     bin_counts = np.zeros(max_radius, dtype=np.int64)
@@ -2236,193 +2683,217 @@ def _calculate_orientational_correlation_length_cpu(image_array, mask_array, max
 
 
 def calculate_rdf_shape_matrices(rdf_df, num_levels):
+    """Batch active RDF statistics over each pair's geometrically supported prefix `:L`
+    (including geometrically supported shells with zero observed neighbors).
     """
-    Calculates primary matrices based on the shape of the g(r) curves.
-    UPDATED: Uses 'Non-Zero' statistics to handle variable tumor sizes robustly,
-    and calculates the Dispersion Ratio (Variance/Mean).
-    """
+    import numpy as np
     if rdf_df.empty:
         return {}
+    names = ('RDF_PeakPosition', 'RDF_DispersionRatio', 'LogRDF_Median',
+             'LogRDF_Variance', 'LogRDF_Skewness', 'LogRDF_Kurtosis',
+             'LogRDF_PeakHeight')
+    output = {name: np.full((num_levels, num_levels), np.nan) for name in names}
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r, raw, pairs, _ = extract_fast_raw_rdf(rdf_df, num_levels)
+    if not pairs or r.size == 0:
+        return output
+    cutoff_idx = get_row_cutoff_indices(raw, rdf_df)
+    col_grid = np.arange(r.size, dtype=np.int32)[None, :]
+    sup_mask = col_grid < cutoff_idx[:, None]
+    raw_sup = np.where(sup_mask, raw, 0.0)
 
-    # Initialize empty matrices
-    mat_peak_pos = np.full((num_levels, num_levels), np.nan)
-    mat_dispersion_ratio = np.full((num_levels, num_levels), np.nan) # NEW: Dispersion Ratio
+    aa, bb = np.asarray(pairs).T
+    has_signal = (cutoff_idx > 0) & np.any(raw_sup > 1e-6, axis=1)
+    log_values = np.log1p(np.maximum(raw, 0.0))
+    if np.any(has_signal):
+        raw_for_peak = np.where(sup_mask[has_signal], raw[has_signal], -np.inf)
+        log_for_peak = np.where(sup_mask[has_signal], log_values[has_signal], -np.inf)
+        output['RDF_PeakPosition'][aa[has_signal], bb[has_signal]] = r[np.argmax(raw_for_peak, axis=1)]
+        output['LogRDF_PeakHeight'][aa[has_signal], bb[has_signal]] = np.max(log_for_peak, axis=1)
 
-    mat_log_median = np.full((num_levels, num_levels), np.nan)
-    mat_log_var = np.full((num_levels, num_levels), np.nan)
-    mat_log_skew = np.full((num_levels, num_levels), np.nan)
-    mat_log_kurt = np.full((num_levels, num_levels), np.nan)
-    mat_log_peak_height = np.full((num_levels, num_levels), np.nan)
+    eps = np.finfo(np.float64).eps
+    valid_moment_rows = has_signal & (cutoff_idx > 2)
+    for L in np.unique(cutoff_idx[valid_moment_rows]):
+        L = int(L)
+        ids = np.flatnonzero(valid_moment_rows & (cutoff_idx == L))
+        x = raw[ids, :L]
+        y = log_values[ids, :L]
+        mean_x = np.mean(x, axis=1)
+        var_x = np.var(x, axis=1)
+        ratio = np.zeros(len(ids), dtype=float)
+        np.divide(var_x, mean_x, out=ratio, where=mean_x > 0)
 
-    r_values = rdf_df['r'].values
+        mean_y = np.mean(y, axis=1, keepdims=True)
+        d = y - mean_y
+        d2 = d * d
+        m2 = np.mean(d2, axis=1)
+        m3 = np.mean(d2 * d, axis=1)
+        m4 = np.mean(d2 * d2, axis=1)
+        zero_var = m2 <= (eps * np.abs(mean_y[:, 0])) ** 2
+        safe_m2 = np.where(zero_var, 1.0, m2)
+        skew = np.where(zero_var, np.nan, m3 / (safe_m2 * np.sqrt(safe_m2)))
+        kurt = np.where(zero_var, np.nan, (m4 / (safe_m2 * safe_m2)) - 3.0)
 
-    for i in range(num_levels):
-        for j in range(num_levels):
-            key = f'g_{i}_{j}'
-            if key in rdf_df.columns:
-                g_r_vector = rdf_df[key].values
-                
-                # --- PEAK DETECTION (Global) ---
-                if g_r_vector.size > 0:
-                    peak_index = np.argmax(g_r_vector)
-                    mat_peak_pos[i, j] = r_values[peak_index]
-
-                # --- SMART STATISTICS (Ignore Trailing Zeros) ---
-                valid_mask = g_r_vector > 1e-6 # Filter out the empty "tail"
-                active_raw_data = g_r_vector[valid_mask] # NEW: Raw data for Dispersion
-                
-                # 1. Calculate Raw Dispersion Ratio (Variance / Mean)
-                if active_raw_data.size > 2:
-                    raw_mean = np.mean(active_raw_data)
-                    raw_var = np.var(active_raw_data)
-                    if raw_mean > 0:
-                        mat_dispersion_ratio[i, j] = raw_var / raw_mean
-                    else:
-                        mat_dispersion_ratio[i, j] = 0.0
-
-                # 2. Log-Transform for standard shape stats
-                log_g_r_vector = np.log1p(g_r_vector)
-                active_log_data = log_g_r_vector[valid_mask]
-                
-                # 3. Calculate stats on the ACTIVE log region only
-                if active_log_data.size > 2:
-                    mat_log_median[i, j] = np.median(active_log_data)
-                    mat_log_var[i, j] = np.var(active_log_data)
-                    mat_log_skew[i, j] = stats.skew(active_log_data)
-                    mat_log_kurt[i, j] = stats.kurtosis(active_log_data)
-                
-                # Peak Height is always the max, regardless of zeros
-                if log_g_r_vector.size > 0:
-                    mat_log_peak_height[i, j] = np.max(log_g_r_vector)
-                
-    return {
-        "RDF_PeakPosition": mat_peak_pos,
-        "RDF_DispersionRatio": mat_dispersion_ratio, # NEW: Return the matrix
-        "LogRDF_Median": mat_log_median,
-        "LogRDF_Variance": mat_log_var,
-        "LogRDF_Skewness": mat_log_skew,
-        "LogRDF_Kurtosis": mat_log_kurt,
-        "LogRDF_PeakHeight": mat_log_peak_height
-    }
+        a, b = aa[ids], bb[ids]
+        output['RDF_DispersionRatio'][a, b] = ratio
+        output['LogRDF_Median'][a, b] = np.median(y, axis=1)
+        output['LogRDF_Variance'][a, b] = m2
+        output['LogRDF_Skewness'][a, b] = skew
+        output['LogRDF_Kurtosis'][a, b] = kurt
+    return output
 
 
 def calculate_glam_wasserstein_distance(rdf_structured_df, rdf_random_df, num_levels, level_counts, total_roi_voxels):
-    """
-    Calculates the 1-Wasserstein Distance (Earth Mover's Distance) between 
-    the structured and random states. This measures the 'Biological Work' 
-    or 'Assembly Cost' of the tumor's spatial architecture.
+    """Calculates the 1-Wasserstein Distance restricted to the common supported radial domain
+    `L = min(cut_s, cut_r)`, vectorized across all (alpha, beta) pairs grouped by cutoff L.
     """
     wasserstein_distances = {}
-    if rdf_structured_df.empty or rdf_random_df.empty: 
+    if rdf_structured_df.empty or rdf_random_df.empty or total_roi_voxels <= 0:
         return {}
-        
-    r = rdf_structured_df['r'].values
-    
+
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r_s, raw_struct, pairs, row_index = extract_fast_raw_rdf(rdf_structured_df, num_levels)
+    r_r, raw_rand, rand_pairs, rand_index = extract_fast_raw_rdf(rdf_random_df, num_levels)
+    if not np.array_equal(r_s, r_r):
+        raise ValueError('Structured and baseline RDF radius grids differ')
+    cut_s = get_row_cutoff_indices(raw_struct, rdf_structured_df)
+    cut_r = get_row_cutoff_indices(raw_rand, rdf_random_df)
+    rho = np.asarray(level_counts, dtype=np.float64) / float(total_roi_voxels)
+
+    if pairs == rand_pairs and len(pairs) == num_levels * num_levels:
+        common_cut = np.minimum(cut_s, cut_r)
+        aa = np.repeat(np.arange(num_levels), num_levels)
+        bb = np.tile(np.arange(num_levels), num_levels)
+        valid_row = (common_cut >= 2) & (rho[aa] > 0) & (rho[bb] > 0)
+        w_vals = np.full(len(pairs), np.nan, dtype=np.float64)
+
+        for L in np.unique(common_cut[valid_row]):
+            L = int(L)
+            rows = np.flatnonzero(valid_row & (common_cut == L))
+            r_sub = r_s[:L]
+            dr = np.diff(r_sub)[None, :]
+            factor = (4.0 * np.pi * rho[bb[rows], None]) * (r_sub[None, :] ** 2)
+            diff_integrand = (raw_struct[rows, :L] - raw_rand[rows, :L]) * factor
+            # Cumulative trapezoid of (n_struct - n_rand) by linearity!
+            seg = 0.5 * (diff_integrand[:, :-1] + diff_integrand[:, 1:]) * dr
+            n_diff = np.hstack((np.zeros((len(rows), 1), dtype=np.float64), np.cumsum(seg, axis=1)))
+            w_vals[rows] = np.trapezoid(np.abs(n_diff), r_sub, axis=1)
+
+        for alpha in range(num_levels):
+            base_i = alpha * num_levels
+            for beta in range(num_levels):
+                val = w_vals[base_i + beta]
+                wasserstein_distances[f'GLAM_Wasserstein_{alpha}_{beta}'] = float(val) if np.isfinite(val) else np.nan
+        return wasserstein_distances
+
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
-            if key in rdf_structured_df.columns and key in rdf_random_df.columns:
-                g_r_struct = rdf_structured_df[key].values
-                g_r_rand = rdf_random_df[key].values
-                
-                # Apply the spatial screening window
-                g_r_struct_screened = g_r_struct 
-                g_r_rand_screened = g_r_rand
-                
-                # Local density of state beta
-                rho_beta = level_counts[beta] / total_roi_voxels if total_roi_voxels > 0 else 0
-                
-                # Core integrands for the Coordination Number
-                integrand_struct = 4 * np.pi * rho_beta * g_r_struct_screened * (r**2)
-                integrand_rand = 4 * np.pi * rho_beta * g_r_rand_screened * (r**2)
-                
-                # 1. Calculate Cumulative Coordination Numbers N(R)
-                n_struct = scipy.integrate.cumulative_trapezoid(integrand_struct, r, initial=0)
-                n_rand = scipy.integrate.cumulative_trapezoid(integrand_rand, r, initial=0)
-                
-                # 2. Wasserstein Distance is the absolute area between the two cumulative curves
-                w_dist = np.trapezoid(np.abs(n_struct - n_rand), r)
-                wasserstein_distances[f'GLAM_Wasserstein_{alpha}_{beta}'] = w_dist
-                
+            w_key = f'GLAM_Wasserstein_{alpha}_{beta}'
+            s_idx = row_index.get((alpha, beta))
+            r_idx = rand_index.get((alpha, beta))
+            if s_idx is None or r_idx is None or rho[alpha] <= 0 or rho[beta] <= 0:
+                wasserstein_distances[w_key] = np.nan
+                continue
+            L = min(int(cut_s[s_idx]), int(cut_r[r_idx]))
+            if L < 2:
+                wasserstein_distances[w_key] = np.nan
+                continue
+            r_sub = r_s[:L]
+            factor = 4.0 * np.pi * rho[beta] * (r_sub ** 2)
+            n_struct = scipy.integrate.cumulative_trapezoid(raw_struct[s_idx, :L] * factor, r_sub, initial=0.0)
+            n_rand = scipy.integrate.cumulative_trapezoid(raw_rand[r_idx, :L] * factor, r_sub, initial=0.0)
+            wasserstein_distances[w_key] = float(np.trapezoid(np.abs(n_struct - n_rand), r_sub))
+
     return wasserstein_distances
 
+
+def _nan_safe_gradient_2d(mat):
+    """Compute mixed partial derivative d2/dalpha dbeta over finite states without NaN bleed."""
+    def grad_1d(arr, axis):
+        out = np.full_like(arr, np.nan, dtype=np.float64)
+        if axis == 0:
+            for j in range(arr.shape[1]):
+                col = arr[:, j]
+                fin = np.flatnonzero(np.isfinite(col))
+                if fin.size >= 2:
+                    out[fin, j] = np.gradient(col[fin]) if np.all(np.diff(fin) == 1) else np.gradient(col[fin], fin.astype(np.float64))
+        else:
+            for i in range(arr.shape[0]):
+                row = arr[i, :]
+                fin = np.flatnonzero(np.isfinite(row))
+                if fin.size >= 2:
+                    out[i, fin] = np.gradient(row[fin]) if np.all(np.diff(fin) == 1) else np.gradient(row[fin], fin.astype(np.float64))
+        return out
+
+    return grad_1d(grad_1d(mat, axis=0), axis=1)
+
+
 def calculate_glam_assembly_coupling_matrix(wasserstein_distances, num_levels):
-    """
-    Calculates the Assembly Coupling Matrix (Thermodynamic Entanglement).
-    Computes the mixed partial derivative of the 1-Wasserstein Distance 
-    with respect to reference state alpha and target state beta (∂²EMD / ∂α∂β).
-    """
+    """Calculates the Assembly Coupling Matrix (mixed partial derivative of Wasserstein Distance)."""
     coupling_features = {}
     if not wasserstein_distances:
         return coupling_features
-        
-    # 1. Reconstruct the 2D EMD Matrix
-    emd_matrix = np.zeros((num_levels, num_levels))
+
+    emd_matrix = np.full((num_levels, num_levels), np.nan, dtype=np.float64)
     for alpha in range(num_levels):
         for beta in range(num_levels):
             key = f'GLAM_Wasserstein_{alpha}_{beta}'
-            emd_matrix[alpha, beta] = wasserstein_distances.get(key, 0.0)
-            
-    # 2. Compute Discrete Derivatives
-    # First derivative with respect to alpha (rows, axis=0) -> Chemical Potential
-    dEMD_dalpha = np.gradient(emd_matrix, axis=0)
-    
-    # Second derivative with respect to beta (columns, axis=1) -> Assembly Coupling
-    d2EMD_dalpha_dbeta = np.gradient(dEMD_dalpha, axis=1)
-    
-    # 3. Flatten back to GLAM dictionary format
+            emd_matrix[alpha, beta] = wasserstein_distances.get(key, np.nan)
+
+    d2EMD = _nan_safe_gradient_2d(emd_matrix)
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'GLAM_AssemblyCoupling_{alpha}_{beta}'
-            coupling_features[key] = d2EMD_dalpha_dbeta[alpha, beta]
-            
+            val = d2EMD[alpha, beta]
+            coupling_features[f'GLAM_AssemblyCoupling_{alpha}_{beta}'] = float(val) if np.isfinite(val) else np.nan
+
     return coupling_features
 
+
 def calculate_glam_phenotypic_distance_matrix(rdf_df, num_levels, level_counts, total_roi_voxels):
+    """Compare normalized auto-RDF cumulative curves on pairwise common support.
+    Normalization is performed after selecting the common domain, not before.
+    Valid self-distances are zero; undefined states/pairs return NaN.
     """
-    Calculates the Phenotypic Distance Matrix (Phase-Space Optimal Transport).
-    Measures the exact morphological distance between the spatial topologies of different 
-    gray levels (α and β) by comparing their normalized auto-correlation CDFs.
-    """
-    phenotypic_features = {}
-    if rdf_df.empty or total_roi_voxels == 0: 
-        return phenotypic_features
-        
-    r = rdf_df['r'].values
-    cdfs = np.zeros((num_levels, len(r)))
-    
-    # 1. Build the Normalized CDF for every gray level's auto-correlation (self-texture)
-    for i in range(num_levels):
-        key = f'g_{i}_{i}'
-        if key in rdf_df.columns and level_counts[i] > 0:
-            rho_i = level_counts[i] / total_roi_voxels
-            g_r = rdf_df[key].values
-            
-            # Incorporate the spherical volume element
-            integrand = 4 * np.pi * rho_i * g_r * (r**2)
-            
-            # Calculate the Cumulative Coordination Number N_i(r)
-            N_r = scipy.integrate.cumulative_trapezoid(integrand, r, initial=0)
-            
-            # Normalize to 1 to create a true probability Cumulative Distribution Function
-            max_val = N_r[-1]
-            if max_val > 1e-9:
-                cdfs[i] = N_r / max_val
-                
-    # 2. Calculate the Phase-Space EMD (Area between the CDFs)
+    result = {}
+    if rdf_df.empty or total_roi_voxels <= 0:
+        return result
+    from .rdf_smoothing import extract_fast_raw_rdf, get_row_cutoff_indices
+    r, raw, _, row_index = extract_fast_raw_rdf(rdf_df, num_levels)
+    if r.size < 2:
+        return result
+    if not np.all(np.isfinite(r)) or np.any(np.diff(r) <= 0):
+        raise ValueError('PhenotypicDistance requires finite, strictly increasing radii')
+    cuts = get_row_cutoff_indices(raw, rdf_df)
+    rho = np.asarray(level_counts, dtype=np.float64) / float(total_roi_voxels)
+    cumulative = [None] * num_levels
+    diag_cuts = np.zeros(num_levels, dtype=np.int32)
+    for state in range(num_levels):
+        idx = row_index.get((state, state))
+        if idx is None or not np.isfinite(rho[state]) or rho[state] <= 0:
+            continue
+        L = int(cuts[idx])
+        if L < 2:
+            continue
+        g = raw[idx, :L]
+        if not np.all(np.isfinite(g)) or np.any(g < 0):
+            continue
+        integrand = 4.0 * np.pi * rho[state] * g * r[:L]**2
+        cumulative[state] = scipy.integrate.cumulative_trapezoid(integrand, r[:L], initial=0.0)
+        diag_cuts[state] = L
     for alpha in range(num_levels):
-        for beta in range(num_levels):
-            # If both are empty biological states, the topological distance is 0
-            if level_counts[alpha] == 0 and level_counts[beta] == 0:
-                dist = 0.0
-            else:
-                # The 1-Wasserstein Distance is the absolute integral of the CDF differences
-                diff = np.abs(cdfs[alpha] - cdfs[beta])
-                dist = np.trapezoid(diff, r)
-                
-            phenotypic_features[f'GLAM_PhenotypicDistance_{alpha}_{beta}'] = float(dist)
-            
-    return phenotypic_features
+        for beta in range(alpha, num_levels):
+            L = min(int(diag_cuts[alpha]), int(diag_cuts[beta]))
+            value = np.nan
+            if L >= 2:
+                ca, cb = cumulative[alpha][:L], cumulative[beta][:L]
+                ma, mb = float(ca[-1]), float(cb[-1])
+                if np.isfinite(ma) and np.isfinite(mb) and ma > 1e-9 and mb > 1e-9:
+                    value = 0.0 if alpha == beta else float(
+                        scipy.integrate.trapezoid(np.abs(ca / ma - cb / mb), r[:L]))
+            result[f'GLAM_PhenotypicDistance_{alpha}_{beta}'] = value
+            result[f'GLAM_PhenotypicDistance_{beta}_{alpha}'] = value
+    return result
+
 
 
 def calculate_first_order_stats_from_matrix(matrix, feature_prefix):
@@ -2461,139 +2932,148 @@ def calculate_first_order_stats_from_matrix(matrix, feature_prefix):
     stats_features[f'{feature_prefix}.Variance'] = np.var(flat_matrix)
     return stats_features
 
+def _extract_active_submatrix(matrix):
+    """Drop completely empty (all-NaN) rows/columns before spectral/GLCM/symmetry/cluster analysis."""
+    if matrix is None or matrix.ndim != 2:
+        return None
+    finite = np.isfinite(matrix)
+    if not np.any(finite):
+        return None
+    if matrix.shape[0] == matrix.shape[1]:
+        active = np.any(finite, axis=1) | np.any(finite, axis=0)
+        sub = matrix[np.ix_(active, active)].copy()
+    else:
+        r_act = np.any(finite, axis=1)
+        c_act = np.any(finite, axis=0)
+        sub = matrix[np.ix_(r_act, c_act)].copy()
+    if sub.size == 0 or not np.any(np.isfinite(sub)):
+        return None
+    if np.isnan(sub).any():
+        fill_val = float(np.nanmean(sub[np.isfinite(sub)]))
+        sub = np.nan_to_num(sub, nan=fill_val if np.isfinite(fill_val) else 0.0)
+    return sub
+
+
 def calculate_glcm_style_meta_features(glam_matrix, feature_prefix):
-    """Calculates a comprehensive set of 24 GLCM-style features from a given matrix."""
+    """Calculates a comprehensive set of 24 GLCM-style features on the active submatrix."""
     meta_features = {}
-    if glam_matrix is None or np.all(np.isnan(glam_matrix)):
+    clean_matrix = _extract_active_submatrix(glam_matrix)
+    if clean_matrix is None:
         return meta_features
-    
-    if glam_matrix.ndim != 2:
-        print(f"  - WARNING: GLCM-style features skipped for {feature_prefix}, not a 2D matrix.")
-        return {}
-        
-    clean_matrix = glam_matrix.copy()
-    if np.isnan(clean_matrix).any():
-        mean_val = np.nanmean(clean_matrix[np.isfinite(clean_matrix)])
-        clean_matrix = np.nan_to_num(clean_matrix, nan=mean_val if not np.isnan(mean_val) else 0)
-    
+
     min_val = np.min(clean_matrix)
     if min_val < 0:
         clean_matrix = clean_matrix - min_val
 
     matrix_sum = np.sum(clean_matrix)
-    if matrix_sum == 0: return {}
+    if matrix_sum == 0:
+        return {}
     p = clean_matrix / matrix_sum
-    
+
     i, j = np.ogrid[0:p.shape[0], 0:p.shape[1]]
     N = p.shape[0]
-    
+
     px = np.sum(p, axis=1)
     py = np.sum(p, axis=0)
-    
+
     ux = np.sum(i.ravel() * px)
     uy = np.sum(j.ravel() * py)
 
-    sx = np.sum(px * (i.ravel() - ux)**2)
-    sy = np.sum(py * (j.ravel() - uy)**2)
-    
+    sx = np.sum(px * (i.ravel() - ux) ** 2)
+    sy = np.sum(py * (j.ravel() - uy) ** 2)
+
     meta_features[f'{feature_prefix}.Autocorrelation'] = np.sum(p * i * j)
-    meta_features[f'{feature_prefix}.JointEnergy'] = np.sum(p**2)
-    meta_features[f'{feature_prefix}.JointEntropy'] = -np.sum(p[p>0] * np.log2(p[p>0]))
-    meta_features[f'{feature_prefix}.Contrast'] = np.sum(p * (i - j)**2)
-    
+    meta_features[f'{feature_prefix}.JointEnergy'] = np.sum(p ** 2)
+    meta_features[f'{feature_prefix}.JointEntropy'] = -np.sum(p[p > 0] * np.log2(p[p > 0]))
+    meta_features[f'{feature_prefix}.Contrast'] = np.sum(p * (i - j) ** 2)
+
     if sx > 0 and sy > 0:
         meta_features[f'{feature_prefix}.Correlation'] = (np.sum(p * (i - ux) * (j - uy))) / np.sqrt(sx * sy)
     else:
         meta_features[f'{feature_prefix}.Correlation'] = 0
 
     meta_features[f'{feature_prefix}.InverseDifference'] = np.sum(p / (1 + np.abs(i - j)))
-    meta_features[f'{feature_prefix}.InverseDifferenceMoment'] = np.sum(p / (1 + (i-j)**2))
+    meta_features[f'{feature_prefix}.InverseDifferenceMoment'] = np.sum(p / (1 + (i - j) ** 2))
     meta_features[f'{feature_prefix}.InverseDifferenceNormalized'] = np.sum(p / (1 + (np.abs(i - j) / N)))
-    meta_features[f'{feature_prefix}.InverseDifferenceMomentNormalized'] = np.sum(p / (1 + ((i - j)**2 / N**2)))
+    meta_features[f'{feature_prefix}.InverseDifferenceMomentNormalized'] = np.sum(p / (1 + ((i - j) ** 2 / N ** 2)))
 
     with np.errstate(divide='ignore', invalid='ignore'):
-        inv_var = p / ((i-j)**2)
-        inv_var[i==j] = 0
+        inv_var = p / ((i - j) ** 2)
+        inv_var[i == j] = 0
         meta_features[f'{feature_prefix}.InverseVariance'] = np.sum(inv_var)
 
-    k_sum = np.arange(2 * (N-1) + 1)
+    k_sum = np.arange(2 * (N - 1) + 1)
     k_diff = np.arange(N)
     px_plus_y = np.array([np.sum(p[i + j == k]) for k in k_sum])
     px_minus_y = np.array([np.sum(p[np.abs(i - j) == k]) for k in k_diff])
 
     meta_features[f'{feature_prefix}.SumAverage'] = np.sum(k_sum * px_plus_y)
-    meta_features[f'{feature_prefix}.SumEntropy'] = -np.sum(px_plus_y[px_plus_y>0] * np.log2(px_plus_y[px_plus_y>0]))
-    meta_features[f'{feature_prefix}.SumSquares'] = np.sum(p * (i - ux)**2) 
+    meta_features[f'{feature_prefix}.SumEntropy'] = -np.sum(px_plus_y[px_plus_y > 0] * np.log2(px_plus_y[px_plus_y > 0]))
+    meta_features[f'{feature_prefix}.SumSquares'] = np.sum(p * (i - ux) ** 2)
     meta_features[f'{feature_prefix}.DifferenceAverage'] = np.sum(k_diff * px_minus_y)
-    meta_features[f'{feature_prefix}.DifferenceEntropy'] = -np.sum(px_minus_y[px_minus_y>0] * np.log2(px_minus_y[px_minus_y>0]))
-    meta_features[f'{feature_prefix}.DifferenceVariance'] = np.sum(px_minus_y * (k_diff - meta_features[f'{feature_prefix}.DifferenceAverage'])**2)
+    meta_features[f'{feature_prefix}.DifferenceEntropy'] = -np.sum(px_minus_y[px_minus_y > 0] * np.log2(px_minus_y[px_minus_y > 0]))
+    meta_features[f'{feature_prefix}.DifferenceVariance'] = np.sum(px_minus_y * (k_diff - meta_features[f'{feature_prefix}.DifferenceAverage']) ** 2)
 
-    hx = -np.sum(px[px>0] * np.log2(px[px>0]))
-    hy = -np.sum(py[py>0] * np.log2(py[py>0]))
+    hx = -np.sum(px[px > 0] * np.log2(px[px > 0]))
+    hy = -np.sum(py[py > 0] * np.log2(py[py > 0]))
     px_py = px[:, None] * py[None, :]
-    hxy1 = -np.sum(p[px_py>0] * np.log2(px_py[px_py>0]))
-    hxy2 = -np.sum(px_py[px_py>0] * np.log2(px_py[px_py>0]))
+    hxy1 = -np.sum(p[px_py > 0] * np.log2(px_py[px_py > 0]))
+    hxy2 = -np.sum(px_py[px_py > 0] * np.log2(px_py[px_py > 0]))
 
     if max(hx, hy) > 0:
         meta_features[f'{feature_prefix}.Imc1'] = (meta_features[f'{feature_prefix}.JointEntropy'] - hxy1) / max(hx, hy)
     else:
         meta_features[f'{feature_prefix}.Imc1'] = 0
-        
+
     if hxy2 > meta_features[f'{feature_prefix}.JointEntropy']:
         meta_features[f'{feature_prefix}.Imc2'] = np.sqrt(1 - np.exp(-2 * (hxy2 - meta_features[f'{feature_prefix}.JointEntropy'])))
     else:
         meta_features[f'{feature_prefix}.Imc2'] = 0
 
-    meta_features[f'{feature_prefix}.ClusterShade'] = np.sum((i + j - ux - uy)**3 * p)
-    meta_features[f'{feature_prefix}.ClusterProminence'] = np.sum((i + j - ux - uy)**4 * p)
-    
-    meta_features[f'{feature_prefix}.JointAverage'] = ux 
+    meta_features[f'{feature_prefix}.ClusterShade'] = np.sum((i + j - ux - uy) ** 3 * p)
+    meta_features[f'{feature_prefix}.ClusterProminence'] = np.sum((i + j - ux - uy) ** 4 * p)
+
+    meta_features[f'{feature_prefix}.JointAverage'] = ux
     meta_features[f'{feature_prefix}.MaximumProbability'] = np.max(p)
-    meta_features[f'{feature_prefix}.ClusterTendency'] = np.sum((i + j - ux - uy)**2 * p)
+    meta_features[f'{feature_prefix}.ClusterTendency'] = np.sum((i + j - ux - uy) ** 2 * p)
 
     return meta_features
 
+
 def calculate_advanced_eigen_features(matrix, feature_prefix):
-    """Calculates Eigen-decomposition features for a given matrix."""
+    """Calculates Eigen-decomposition features on the active square submatrix."""
     eigen_features = {}
-    if matrix is None or np.all(np.isnan(matrix)) or matrix.shape[0] != matrix.shape[1]: 
-        if matrix.ndim == 1: 
-             print(f"  - SKIPPING: Eigen-features for {feature_prefix}, not a square matrix.")
+    if matrix is None or np.all(np.isnan(matrix)) or matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        return eigen_features
+    clean_matrix = _extract_active_submatrix(matrix)
+    if clean_matrix is None or clean_matrix.shape[0] < 2:
         return eigen_features
     try:
-        clean_matrix = np.nan_to_num(matrix, nan=np.nanmean(matrix[np.isfinite(matrix)]))
-        
         eigenvalues = np.real(np.linalg.eigvals(clean_matrix))
-        
         eigenvalues_sorted = sorted(eigenvalues, key=np.abs, reverse=True)
-        
+
         eigen_features[f'{feature_prefix}.Eigen.Eigenvalue1'] = eigenvalues_sorted[0]
-        if len(eigenvalues_sorted) > 1: eigen_features[f'{feature_prefix}.Eigen.Eigenvalue2'] = eigenvalues_sorted[1]
+        if len(eigenvalues_sorted) > 1:
+            eigen_features[f'{feature_prefix}.Eigen.Eigenvalue2'] = eigenvalues_sorted[1]
         eigen_features[f'{feature_prefix}.Eigen.SpectralRadius'] = np.abs(eigenvalues_sorted[0])
         eigen_features[f'{feature_prefix}.Eigen.Trace'] = np.trace(clean_matrix)
-        
+
         abs_eigenvalues = np.abs(eigenvalues) + 1e-9
         eigen_features[f'{feature_prefix}.Eigen.LogDeterminant'] = np.sum(np.log(abs_eigenvalues))
         eigen_features[f'{feature_prefix}.Eigen.DeterminantSign'] = np.prod(np.sign(eigenvalues))
 
-        # --- FIX START ---
-        # Changed [] to np.array([]) to ensure type consistency
         p = np.abs(eigenvalues) / np.sum(np.abs(eigenvalues)) if np.sum(np.abs(eigenvalues)) > 0 else np.array([])
-        
-        # Now p is always a numpy array, so p > 0 works
-        if len(p) > 0 and len(p[p>0]) > 0: 
-            eigen_features[f'{feature_prefix}.Eigen.Entropy'] = -np.sum(p[p>0] * np.log2(p[p>0]))
-        # --- FIX END ---
-    
-    except np.linalg.LinAlgError: print(f"  - WARNING: Eigen-decomposition failed for {feature_prefix}.")
+        if len(p) > 0 and len(p[p > 0]) > 0:
+            eigen_features[f'{feature_prefix}.Eigen.Entropy'] = -np.sum(p[p > 0] * np.log2(p[p > 0]))
+    except np.linalg.LinAlgError:
+        print(f"  - WARNING: Eigen-decomposition failed for {feature_prefix}.")
     return eigen_features
+
 
 def calculate_diagonal_features(matrix, feature_prefix):
     """Calculates Diagonal vs. Off-Diagonal features."""
     diag_features = {}
     if matrix is None or np.all(np.isnan(matrix)) or matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        if matrix.ndim == 1:
-            print(f"  - SKIPPING: Diagonal-features for {feature_prefix}, not a square matrix.")
         return diag_features
     diagonal = np.diag(matrix)[~np.isnan(np.diag(matrix))]
     off_diagonal = matrix[~np.eye(matrix.shape[0], dtype=bool)]
@@ -2605,17 +3085,19 @@ def calculate_diagonal_features(matrix, feature_prefix):
         diag_features[f'{feature_prefix}.OffDiag.Mean'] = np.mean(off_diagonal)
         diag_features[f'{feature_prefix}.OffDiag.Variance'] = np.var(off_diagonal)
     sum_abs_diag, sum_abs_offdiag = np.sum(np.abs(diagonal)), np.sum(np.abs(off_diagonal))
-    if sum_abs_offdiag > 0: diag_features[f'{feature_prefix}.Diag.DominanceRatio'] = sum_abs_diag / sum_abs_offdiag
+    if sum_abs_offdiag > 0:
+        diag_features[f'{feature_prefix}.Diag.DominanceRatio'] = sum_abs_diag / sum_abs_offdiag
     return diag_features
 
+
 def calculate_symmetry_features(matrix, feature_prefix):
-    """Calculates features based on the symmetry/asymmetry of the matrix."""
+    """Calculates features based on the symmetry/asymmetry of the active square submatrix."""
     sym_features = {}
     if matrix is None or np.all(np.isnan(matrix)) or matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        if matrix.ndim == 1:
-            print(f"  - SKIPPING: Symmetry-features for {feature_prefix}, not a square matrix.")
         return sym_features
-    clean_matrix = np.nan_to_num(matrix, nan=np.nanmean(matrix[np.isfinite(matrix)]))
+    clean_matrix = _extract_active_submatrix(matrix)
+    if clean_matrix is None:
+        return sym_features
     asymmetry_matrix = clean_matrix - clean_matrix.T
     sym_features[f'{feature_prefix}.Symmetry.FrobeniusNorm'] = np.linalg.norm(asymmetry_matrix, 'fro')
     sym_features[f'{feature_prefix}.Symmetry.MeanAbsoluteAsymmetry'] = np.mean(np.abs(asymmetry_matrix))
@@ -2624,52 +3106,48 @@ def calculate_symmetry_features(matrix, feature_prefix):
     sym_features[f'{feature_prefix}.Symmetry.NetInfluenceVariance'] = np.var(net_influence)
     return sym_features
 
-def calculate_cluster_features(matrix, feature_prefix):
-    """Calculates features based on K-Means clustering of the matrix rows."""
-    cluster_features = {}
-    
-    # 1. Basic Validity Checks
-    if matrix is None or np.all(np.isnan(matrix)) or matrix.shape[0] < 4: 
-        return cluster_features
-    
-    clean_matrix = np.nan_to_num(matrix, nan=np.nanmean(matrix[np.isfinite(matrix)]))
-    
-    if clean_matrix.ndim == 1:
-        clean_matrix = clean_matrix.reshape(-1, 1)
 
-    # Count how many unique rows exist. We cannot find more clusters than unique rows.
+def calculate_cluster_features(matrix, feature_prefix):
+    """Calculates features based on K-Means clustering of active matrix rows."""
+    cluster_features = {}
+    if matrix is None or np.all(np.isnan(matrix)):
+        return cluster_features
+
+    if matrix.ndim == 1:
+        valid = matrix[np.isfinite(matrix)]
+        if valid.size < 4:
+            return cluster_features
+        clean_matrix = valid.reshape(-1, 1)
+    else:
+        clean_matrix = _extract_active_submatrix(matrix)
+        if clean_matrix is None or clean_matrix.shape[0] < 4:
+            return cluster_features
+
     unique_rows = np.unique(clean_matrix, axis=0)
     n_unique = unique_rows.shape[0]
-
-    # Cap K at 8, matrix size, OR number of unique rows
     max_possible_k = min(8, clean_matrix.shape[0] - 1, n_unique)
-    
-    if max_possible_k < 2: 
+    if max_possible_k < 2:
         return {}
-    # ---------------------------------------
-        
+
     best_k, best_score = -1, -1
-    
     for k in range(2, max_possible_k + 1):
         try:
-            # fit_predict suppresses some warnings better than fit()
             kmeans_attempt = KMeans(n_clusters=k, random_state=42, n_init=10)
             labels = kmeans_attempt.fit_predict(clean_matrix)
-            
-            # Ensure we actually got k clusters
-            if len(np.unique(labels)) < 2: continue
-
+            if len(np.unique(labels)) < 2:
+                continue
             score = silhouette_score(clean_matrix, labels)
-            if score > best_score: best_score, best_k = score, k
-        except Exception: 
+            if score > best_score:
+                best_score, best_k = score, k
+        except Exception:
             continue
-            
+
     if best_k != -1:
         kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10).fit(clean_matrix)
         cluster_features[f'{feature_prefix}.Cluster.OptimalK'] = best_k
         cluster_features[f'{feature_prefix}.Cluster.SilhouetteScore'] = best_score
         cluster_features[f'{feature_prefix}.Cluster.Inertia'] = kmeans.inertia_
-        
+
         unique, counts = np.unique(kmeans.labels_, return_counts=True)
         if len(counts) > 0:
             cluster_features[f'{feature_prefix}.Cluster.SizeMedian'] = np.median(counts)
@@ -2677,8 +3155,9 @@ def calculate_cluster_features(matrix, feature_prefix):
             cluster_features[f'{feature_prefix}.Cluster.SizeVariance'] = np.var(counts)
             cluster_features[f'{feature_prefix}.Cluster.SizeMax'] = np.max(counts)
             cluster_features[f'{feature_prefix}.Cluster.SizeMin'] = np.min(counts)
-            
+
     return cluster_features
+
 
 def calculate_profile_shape_features(matrix, feature_prefix):
     """
@@ -3607,200 +4086,55 @@ def calculate_glam_frustration_index(spi_metrics, cdi_metrics, num_levels, epsil
     return frustration_metrics
 
 def calculate_glam_local_packing_fraction(rdf_df, num_levels, level_counts, total_roi_voxels):
+    """Calculates the Local Packing Fraction (Phi) within the first coordination shell
+    using cutoff-safe smoothed RDFs (including r=1 contact peaks).
     """
-    Calculates the Local Packing Fraction (\Phi) within the first coordination shell.
-    Represents the dimensionless volume fraction occupied by neighboring gray levels.
-    """
-    # --- Get config params ---
     savgol_window = get_config('SavgolWindow')
     savgol_poly = get_config('SavgolPoly')
     peak_prominence = get_config('PeakProminence')
 
     packing_fractions = {}
-    if rdf_df.empty or total_roi_voxels == 0: 
+    if rdf_df.empty or total_roi_voxels <= 0:
         return packing_fractions
 
-    r = rdf_df['r'].values
+    from .rdf_smoothing import prepare_smoothed_rdf
+    smoothed = prepare_smoothed_rdf(rdf_df, num_levels, savgol_window, savgol_poly)
+    r = smoothed.radius
+    n_r = r.size
+    pairs = smoothed.pairs
+    n_pairs = len(pairs)
+    if not n_pairs or n_r == 0:
+        return packing_fractions
+
+    raw_mat = smoothed.raw
+    cutoff_idx = smoothed.cutoff_idx
+    col_grid = np.arange(n_r, dtype=np.int32)[None, :]
+    in_sup = col_grid < cutoff_idx[:, None]
+    has_pos = (cutoff_idx >= 2) & np.any(np.where(in_sup, raw_mat, 0.0) > 0, axis=1)
+
+    r_min_indices, row_active = _find_first_shell_minima_cutoff_safe(
+        smoothed.smooth, cutoff_idx, has_pos, 15, peak_prominence
+    )
+    row_active &= (r_min_indices >= 1)
+    rho = np.asarray(level_counts, dtype=np.float64) / float(total_roi_voxels)
 
     for alpha in range(num_levels):
         for beta in range(num_levels):
-            key = f'g_{alpha}_{beta}'
             pack_key = f'GLAM_LocalPackingFraction_{alpha}_{beta}'
-
-            if key not in rdf_df.columns:
+            row_i = smoothed.row_index.get((alpha, beta))
+            if row_i is None or not row_active[row_i] or rho[beta] <= 0:
                 packing_fractions[pack_key] = np.nan
                 continue
-
-            g_r_raw = rdf_df[key].values
-
-            if len(g_r_raw) > savgol_window:
-                g_r = savgol_filter(g_r_raw, savgol_window, savgol_poly, mode='constant', cval=0.0)
-            else:
-                g_r = g_r_raw.copy() 
-
-            rho_beta = level_counts[beta] / total_roi_voxels if total_roi_voxels > 0 else 0
-
-            try:
-                # 1. Dynamically locate the first coordination shell
-                peaks, _ = find_peaks(g_r, prominence=peak_prominence)
-                
-                if len(peaks) == 0:
-                    search_r = min(len(g_r), 15)
-                    if search_r == 0: raise ValueError()
-                    first_peak_idx = np.argmax(g_r[:search_r])
-                    if first_peak_idx == 0: raise ValueError()
-                else:
-                    first_peak_idx = peaks[0]
-
-                minima, _ = find_peaks(-g_r[first_peak_idx:])
-                
-                if len(minima) == 0:
-                    r_min_idx = min(first_peak_idx * 2, len(r) - 1)
-                    if r_min_idx <= first_peak_idx: r_min_idx = len(r) - 1
-                else:
-                    r_min_idx = first_peak_idx + minima[0]
-
-                # 2. Calculate Coordination Number (Z) for the shell
-                integrand = g_r_raw[:r_min_idx+1] * r[:r_min_idx+1]**2
-                integral = np.trapezoid(integrand, r[:r_min_idx+1])
-                Z = 4 * np.pi * rho_beta * integral
-
-                # 3. Calculate Packing Fraction
-                # The radius boundary of the shell (adding 0.5 because r bins represent centers)
-                r_boundary = r[r_min_idx] + 0.5
-                
-                # Ideal volume of a sphere with this radius in voxel units
-                shell_volume_voxels = (4/3) * np.pi * (r_boundary**3)
-
-                if shell_volume_voxels > 0:
-                    packing_fractions[pack_key] = Z / shell_volume_voxels
-                else:
-                    packing_fractions[pack_key] = np.nan
-            except Exception:
-                packing_fractions[pack_key] = np.nan
+            r_min_idx = int(r_min_indices[row_i])
+            end = r_min_idx + 1
+            integrand = raw_mat[row_i, :end] * (r[:end] ** 2)
+            integral = float(np.trapezoid(integrand, r[:end]))
+            Z = 4.0 * np.pi * rho[beta] * integral
+            r_boundary = float(r[r_min_idx]) + 0.5
+            shell_volume_voxels = (4.0 / 3.0) * np.pi * (r_boundary ** 3)
+            packing_fractions[pack_key] = float(Z / shell_volume_voxels) if shell_volume_voxels > 0 else np.nan
 
     return packing_fractions
-
-
-
-
-# def calculate_js_divergence_matrix(rdf_df, num_levels):
-#     """
-#     Calculates the symmetric Jensen-Shannon (JS) Divergence Anisotropy Matrix 
-#     by comparing RDF_ij and RDF_ji. Applies exp(-lambda * r) spatial damping.
-#     """
-#     js_features = {}
-#     if rdf_df.empty: return {}
-    
-#     r = rdf_df['r'].values
-
-#     def safe_kl(p, q):
-#         """Native KL divergence that safely handles 0 * log(0) = 0"""
-#         mask = p > 0
-#         out = np.zeros_like(p)
-#         # Using log2 bounds the final JS divergence strictly between 0 and 1
-#         out[mask] = p[mask] * np.log2(p[mask] / q[mask])
-#         return np.sum(out)
-
-#     for i in range(num_levels):
-#         for j in range(num_levels):
-#             # The diagonal is perfectly symmetric with itself
-#             if i == j:
-#                 js_features[f'GLAM_JSDivergence_{i}_{j}'] = 0.0
-#                 continue
-            
-#             key_ij = f'g_{i}_{j}'
-#             key_ji = f'g_{j}_{i}'
-            
-#             if key_ij in rdf_df.columns and key_ji in rdf_df.columns:
-#                 # 2. Apply damping envelope to raw RDF curves
-#                 P_raw = np.nan_to_num(rdf_df[key_ij].values) 
-#                 Q_raw = np.nan_to_num(rdf_df[key_ji].values) 
-                
-#                 sum_P = np.sum(P_raw)
-#                 sum_Q = np.sum(Q_raw)
-                
-#                 # If both are physical vacuums, they have 0 structural disagreement
-#                 if sum_P == 0 and sum_Q == 0:
-#                     js_features[f'GLAM_JSDivergence_{i}_{j}'] = 0.0
-#                     continue
-                    
-#                 # 3. L1 Re-normalization (Mandatory for probability distributions)
-#                 P = P_raw / sum_P if sum_P > 0 else np.zeros_like(P_raw)
-#                 Q = Q_raw / sum_Q if sum_Q > 0 else np.zeros_like(Q_raw)
-                
-#                 # 4. Calculate Shared Midpoint M
-#                 M = 0.5 * (P + Q)
-                
-#                 # 5. Calculate JS Divergence
-#                 js_val = 0.5 * safe_kl(P, M) + 0.5 * safe_kl(Q, M)
-#                 js_features[f'GLAM_JSDivergence_{i}_{j}'] = js_val
-#             else:
-#                 js_features[f'GLAM_JSDivergence_{i}_{j}'] = np.nan
-                
-#     return js_features
-
-# def calculate_cumulative_js_matrix(rdf_df, num_levels):
-#     """
-#     Calculates a 'Wasserstein-smoothed' JS Divergence Matrix.
-#     Instead of comparing local density g(r), it compares the Cumulative Coordination 
-#     profiles N(R) using the JS Divergence, resulting in a much smoother anisotropy matrix.
-#     """
-#     js_features = {}
-#     if rdf_df.empty: return {}
-    
-#     r = rdf_df['r'].values
-
-#     def safe_kl(p, q):
-#         """Native KL divergence that safely handles 0 * log(0) = 0"""
-#         mask = p > 0
-#         out = np.zeros_like(p)
-#         out[mask] = p[mask] * np.log2(p[mask] / q[mask])
-#         return np.sum(out)
-
-#     for i in range(num_levels):
-#         for j in range(num_levels):
-#             # The diagonal is perfectly symmetric with itself
-#             if i == j:
-#                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = 0.0
-#                 continue
-            
-#             key_ij = f'g_{i}_{j}'
-#             key_ji = f'g_{j}_{i}'
-            
-#             if key_ij in rdf_df.columns and key_ji in rdf_df.columns:
-#                 # 1. Get raw screened signals (incorporating spherical volume element r^2)
-#                 # This matches the core of the Wasserstein integrand
-#                 P_shell = np.nan_to_num(rdf_df[key_ij].values) * (r**2)
-#                 Q_shell = np.nan_to_num(rdf_df[key_ji].values) * (r**2)
-                
-#                 # 2. Convert to Cumulative Profiles (The "Wasserstein" smoothing step)
-#                 # We use cumulative_trapezoid to build a smooth, monotonically increasing curve
-#                 P_cumul = scipy.integrate.cumulative_trapezoid(P_shell, r, initial=0)
-#                 Q_cumul = scipy.integrate.cumulative_trapezoid(Q_shell, r, initial=0)
-                
-#                 sum_P = np.sum(P_cumul)
-#                 sum_Q = np.sum(Q_cumul)
-                
-#                 # If both are physical vacuums, they have 0 structural disagreement
-#                 if sum_P == 0 and sum_Q == 0:
-#                     js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = 0.0
-#                     continue
-                    
-#                 # 3. L1 Re-normalization of the CUMULATIVE profiles
-#                 P = P_cumul / sum_P if sum_P > 0 else np.zeros_like(P_cumul)
-#                 Q = Q_cumul / sum_Q if sum_Q > 0 else np.zeros_like(Q_cumul)
-                
-#                 # 4. Calculate Shared Midpoint M
-#                 M = 0.5 * (P + Q)
-                
-#                 # 5. Calculate JS Divergence on the smoothed profiles
-#                 js_val = 0.5 * safe_kl(P, M) + 0.5 * safe_kl(Q, M)
-#                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = js_val
-#             else:
-#                 js_features[f'GLAM_CumulativeJSDivergence_{i}_{j}'] = np.nan
-                
-#     return js_features
 
 
 def _fit_multifractal_moments(processed_sizes, Z, q_values):
@@ -3833,3 +4167,15 @@ def _fit_multifractal_moments(processed_sizes, Z, q_values):
     return result
 
 # GLAM_RDF_FAST_PATCH_V2
+
+# GLAM_BATCHED_SMOOTHING_INTEGRATION_V7
+
+# GLAM_RDF_SHAPE_BATCH_V8
+
+# GLAM_CPU_REDUCTION_ONLY_V1
+
+# GLAM_PD_COMMON_DOMAIN_ANISO_INVALID_V1
+
+# GLAM_GPU_RDF_OFFLOAD_V1
+
+# GLAM_CDI_GUARD_VIZ_ROBUST_V1

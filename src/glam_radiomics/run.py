@@ -8,7 +8,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 
 from . import mapping
-from .config import load_config, get_config
+from .config import load_config, get_config, get_fixed_count_bounds
 
 # --- Import ALL core functions ---
 from .core import (
@@ -65,6 +65,15 @@ from .utils import (
 
 # =============================================================================
 # === HELPER FUNCTIONS ===
+
+def _roi_deterministic_rng(roi_voxels, salt=0):
+    """Create a deterministic RNG seeded strictly from the quantized ROI content."""
+    import zlib
+    v = np.ascontiguousarray(roi_voxels, dtype=np.int16)
+    crc = zlib.crc32(v.tobytes()) & 0xFFFFFFFF
+    seq = np.random.SeedSequence([42, int(v.size), int(crc), int(salt)])
+    return np.random.RandomState(int(seq.generate_state(1)[0]))
+
 # =============================================================================
 
 def perform_quantization(image_array, mask_array, method, num_levels,
@@ -87,7 +96,7 @@ def perform_quantization(image_array, mask_array, method, num_levels,
         if (global_min is None) != (global_max is None):
             raise ValueError("Supply both global intensity bounds or neither")
         if global_min is None:
-            image_min, image_max = np.percentile(image_array[roi], [1.0, 99.0])
+            image_min, image_max = get_fixed_count_bounds(image_array[roi])
         else:
             image_min, image_max = float(global_min), float(global_max)
         if not np.isfinite([image_min, image_max]).all() or image_max < image_min:
@@ -129,7 +138,12 @@ def perform_quantization(image_array, mask_array, method, num_levels,
 
 def calculate_glam_rdfs(structured_glam_image, roi_quantized_voxels, num_levels,
                         max_radius, level_counts, total_roi_voxels):
-    """Use identical ROI geometry and centered lattice shells for both RDFs."""
+    """Use identical ROI geometry and centered lattice shells for structured and
+    randomized RDFs, deriving baseline values and support metadata strictly from
+    the randomized replicates via `average_supported_rdf_replicates`.
+    """
+    from . import core
+    from .rdf_smoothing import average_supported_rdf_replicates
     n_random = int(get_config('NumRandomisations'))
     samples = int(get_config('RdfSamplePoints'))
     if n_random < 1:
@@ -137,13 +151,17 @@ def calculate_glam_rdfs(structured_glam_image, roi_quantized_voxels, num_levels,
     roi = structured_glam_image >= 0
     if int(roi.sum()) != total_roi_voxels:
         raise ValueError("RDF ROI count mismatch")
-    print("  - Calculating boundary-corrected structured RDF...")
+    backend_label = "GPU Accelerated" if getattr(core, "HAS_GPU", False) else "CPU"
+    print(f"  - Calculating boundary-corrected structured RDF ({backend_label})...")
     structured = calculate_rdf_3d(
         structured_glam_image, num_levels, max_radius, list(level_counts),
         total_roi_voxels, n_random, samples, sample_mask=roi)
+    rng = _roi_deterministic_rng(roi_quantized_voxels, salt=101)
     baseline_frames = []
+    support_masks = []
     for i in range(n_random):
-        shuffled = np.random.permutation(roi_quantized_voxels)
+        print(f"  - Calculating boundary-corrected randomized RDF ({i + 1}/{n_random}, {backend_label})...")
+        shuffled = rng.permutation(roi_quantized_voxels)
         randomized = np.full(structured_glam_image.shape, -1, dtype=np.int16)
         randomized[roi] = shuffled
         frame = calculate_rdf_3d(
@@ -154,10 +172,14 @@ def calculate_glam_rdfs(structured_glam_image, roi_quantized_voxels, num_levels,
         if not np.array_equal(frame['r'].values, structured['r'].values):
             raise RuntimeError("Structured/random RDF radii differ")
         baseline_frames.append(frame)
-    baseline = structured.copy()
-    g_cols = [c for c in structured.columns if c.startswith('g_')]
-    baseline[g_cols] = np.mean(
-        np.stack([f[g_cols].to_numpy() for f in baseline_frames]), axis=0)
+        if isinstance(getattr(frame, 'attrs', None), dict) and '_glam_support_mask' in frame.attrs:
+            support_masks.append(np.asarray(frame.attrs['_glam_support_mask'], dtype=bool))
+    cols = list(structured.columns)
+    g_cols = [c for c in cols if c.startswith('g_')]
+    r_vec = structured['r'].to_numpy(dtype=np.float64, copy=True)
+    vals_stack = np.stack([f[g_cols].to_numpy(dtype=np.float64) for f in baseline_frames], axis=0)
+    sup_stack = np.stack(support_masks, axis=0) if len(support_masks) == n_random else None
+    baseline = average_supported_rdf_replicates(r_vec, cols, vals_stack, sup_stack)
     return structured, baseline
 
 
@@ -246,7 +268,7 @@ def calculate_random_baseline_features(structured_glam_image, roi_quantized_voxe
     print("  - Calculating Random Baseline (Null Model) for Topology & Fractals...")
     
     shuffled_voxels = roi_quantized_voxels.copy()
-    np.random.shuffle(shuffled_voxels)
+    _roi_deterministic_rng(roi_quantized_voxels, salt=202).shuffle(shuffled_voxels)
     
     randomized_image = np.full(structured_glam_image.shape, -1, dtype=np.int16)
     mask_indices = structured_glam_image > -1
@@ -264,7 +286,7 @@ def calculate_random_baseline_features(structured_glam_image, roi_quantized_voxe
 
 def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
                                     total_roi_voxels, num_levels, prefix, output_folder,
-                                    rdf_structured_df): 
+                                    rdf_structured_df, level_counts=None): 
     """
     Builds all GLAM matrices, saves them, and calculates all meta-features.
     """
@@ -314,9 +336,14 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
     glam_matrices = {}
     all_meta_features = {}
 
-    # Build Standard Matrices
+    absent_mask = (np.asarray(level_counts) <= 0) if level_counts is not None else np.zeros(num_levels, dtype=bool)
+
+    # Build Standard Matrices (masking rows/cols of gray levels absent from the tumor ROI to NaN)
     for name, (prefix_str, diag_prefix) in glam_matrix_defs.items():
         matrix = reformat_dict_to_matrix(primary_glam_features, num_levels, prefix_str, diag_prefix)
+        if matrix is not None and np.any(absent_mask):
+            matrix[absent_mask, :] = np.nan
+            matrix[:, absent_mask] = np.nan
         glam_matrices[name] = matrix
         
         if name in comparison_targets:
@@ -326,6 +353,9 @@ def build_and_analyze_glam_matrices(primary_glam_features, scalar_glam_features,
             random_matrix = reformat_dict_to_matrix(primary_glam_features, num_levels, rand_prefix, rand_diag)
             
             if random_matrix is not None:
+                if np.any(absent_mask):
+                    random_matrix[absent_mask, :] = np.nan
+                    random_matrix[:, absent_mask] = np.nan
                 glam_matrices[f"{name}_Random"] = random_matrix
                 
                 excess_matrix = matrix - random_matrix
@@ -578,6 +608,7 @@ def process_scans(input_dir, output_dir, project_name="DefaultProject", config_p
 
 def process_single_scan(prefix, paths, output_dir, config_path):
     """Processes a single patient."""
+    import traceback  # Ensure every exception path can report the original error.
     label_mapping = get_config('LabelMapping')
     labels_for_analysis = get_config('LabelsForAnalysis')
 
@@ -612,44 +643,28 @@ def process_single_scan(prefix, paths, output_dir, config_path):
         print(f"  - WARNING: Skipping scan {prefix}. Unknown mask format.")
         return [], []
 
-    # --- UPDATED: Precompute global intensity bounds (Whole Brain or Whole Tumor) ---
+    # --- UPDATED: Unified global intensity bounds (identical to mapping_mask.py) ---
     method = get_config('QuantizationMethod').lower()
     global_bounds = {}
 
     if method == 'fixedcount':
-        ref_mask_array = None
-        
-        # 1. Try to load the Normalization Mask first
-        if norm_mask_path:
-            print(f"  - Loading Normalization Mask for global intensity bounds: {os.path.basename(norm_mask_path)}")
-            try:
-                norm_mask_sitk = sitk.ReadImage(norm_mask_path, sitk.sitkUInt8)
-                ref_mask_array = sitk.GetArrayFromImage(norm_mask_sitk)
-            except Exception as e:
-                print(f"  - WARNING: Could not read normalization mask {norm_mask_path}: {e}. Falling back to Whole Tumor.")
-        
-        # 2. Fall back to Whole Tumor if no norm mask is provided (or if it failed to load)
-        if ref_mask_array is None:
-            print("  - Precomputing global intensity bounds (Whole Tumor) for consistent quantization...")
-            whole_tumor_mask_sitk = generate_binary_mask(multilabel_mask_sitk, 99)
-            ref_mask_array = sitk.GetArrayFromImage(whole_tumor_mask_sitk)
-
+        from .mapping_mask import load_normalization_mask, compute_sequence_norm_bounds
+        norm_mask_sitk = load_normalization_mask(paths, multilabel_mask_sitk)
         for seq_name, image_path in image_paths_dict.items():
-            try:
-                img_sitk = sitk.ReadImage(image_path, sitk.sitkFloat32)
-                img_arr = sitk.GetArrayFromImage(img_sitk)
-                ref_voxels = img_arr[ref_mask_array > 0]
-
-                if ref_voxels.size > 0:
-                    seq_min = np.percentile(ref_voxels, 1.0)
-                    seq_max = np.percentile(ref_voxels, 99.0)
-                    global_bounds[seq_name] = (seq_min, seq_max)
-                else:
-                    global_bounds[seq_name] = (None, None)
-            except Exception as e:
-                print(f"  - WARNING: Could not precompute bounds for {seq_name}: {e}")
+            img_sitk = sitk.ReadImage(image_path, sitk.sitkFloat32)
+            global_bounds[seq_name] = compute_sequence_norm_bounds(img_sitk, norm_mask_sitk)
     # -----------------------------------------------------------------------------------
 
+    from .mapping_mask import generate_scan_maps
+    if get_config('MappingFirst'):
+        try:
+            generate_scan_maps(prefix, paths, output_dir, config_path, labels_to_process)
+        except Exception:
+            print("  - ERROR: Independent mapping failed; global feature rows retained.")
+            traceback.print_exc()
+        if get_config('MappingOnly'):
+            print('  - MappingOnly enabled: skipping global radiomics/GLAM analysis.')
+            return [], []
     for label_id, label_name in labels_to_process.items():
         print(f"  --- Processing Label: {label_name} ({label_id}) ---")
         
@@ -687,12 +702,12 @@ def process_single_scan(prefix, paths, output_dir, config_path):
                 traceback.print_exc()
 
     # Independent mapping, once per sequence for File mode.
-    from .mapping_mask import generate_scan_maps
-    try:
-        generate_scan_maps(prefix, paths, output_dir, config_path, labels_to_process)
-    except Exception:
-        print("  - ERROR: Independent mapping failed; global feature rows retained.")
-        traceback.print_exc()
+    if not get_config('MappingFirst'):
+        try:
+            generate_scan_maps(prefix, paths, output_dir, config_path, labels_to_process)
+        except Exception:
+            print("  - ERROR: Independent mapping failed; global feature rows retained.")
+            traceback.print_exc()
     return primary_rows_list, meta_rows_list
 
 def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_name, seq_name, output_dir, config_path, global_min=None, global_max=None):
@@ -772,7 +787,7 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
     print("  - Calculating Custom Radiomics (Randomized)...")
     roi_voxels = prep_data['quantized_image'][mask_array > 0]
     shuffled_voxels = roi_voxels.copy()
-    np.random.shuffle(shuffled_voxels)
+    _roi_deterministic_rng(roi_voxels, salt=303).shuffle(shuffled_voxels)
     
     random_quantized_image = np.zeros_like(prep_data['quantized_image'])
     random_quantized_image[mask_array > 0] = shuffled_voxels
@@ -817,7 +832,8 @@ def process_single_label(prefix, image_sitk, binary_mask_sitk, label_id, label_n
 
     glam_matrices, glam_meta_features = build_and_analyze_glam_matrices(
         primary_glam_features, scalar_glam_features, prep_data['total_roi_voxels'],
-        num_gray_levels, prefix, output_dir, rdf_structured_df
+        num_gray_levels, prefix, output_dir, rdf_structured_df,
+        level_counts=prep_data['level_counts']
     )
     
     # Combine everything
@@ -862,3 +878,5 @@ def main():
 
     print("Analysis finished.")
 # GLAM_MAPPING_MASK_V3
+
+# GLAM_PROFILE_MAPPING_FIRST_V6

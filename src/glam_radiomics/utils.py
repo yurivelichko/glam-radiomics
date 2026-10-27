@@ -148,47 +148,43 @@ def generate_binary_mask(multilabel_mask_sitk, label_id):
         # Standard single-label case
         return (multilabel_mask_sitk == int(label_id))
     
+_REFORMAT_KEY_CACHE = {}
+
 def reformat_dict_to_matrix(glam_dict, num_levels, key_prefix, diag_prefix=None):
     """Helper to reformat a flat dictionary of GLAM features into a matrix."""
     matrix = np.full((num_levels, num_levels), np.nan)
-    
-    # 1. Handle off-diagonal / full matrix (ONLY IF PREFIX EXISTS)
-    if key_prefix is not None:
-        for key, value in glam_dict.items():
-            if not key.startswith(key_prefix): continue
-            
-            # THE FIX: Stop the baseline matrix from sucking in 'L1.0' or 'Decay' keys!
-            remainder = key[len(key_prefix):]
-            if "L" in remainder or "Decay" in remainder: 
-                continue
+    cache_key = (num_levels, key_prefix, diag_prefix)
+    cached = _REFORMAT_KEY_CACHE.get(cache_key)
+    if cached is None:
+        pair_keys = []
+        if key_prefix is not None:
+            for a in range(num_levels):
+                for b in range(num_levels):
+                    if diag_prefix and a == b:
+                        continue
+                    pair_keys.append((a, b, f"{key_prefix}{a}_{b}", f"{key_prefix}g_{a}_{b}"))
+        diag_keys = []
+        if diag_prefix:
+            for i in range(num_levels):
+                diag_keys.append((i, f"{diag_prefix}{i}", f"{diag_prefix}g_{i}_{i}"))
+        cached = (pair_keys, diag_keys)
+        _REFORMAT_KEY_CACHE[cache_key] = cached
 
-            try:
-                parts = key.split('_')
-                
-                # Standard case (format: ..._0_1)
-                alpha, beta = int(parts[-2]), int(parts[-1])
-                matrix[alpha, beta] = value
-                    
-            except (IndexError, ValueError): continue
-    
-    # 2. Handle special diagonal prefix (VolumeFD, VolumeLacunarity, VolumeBetti, etc.)
-    if diag_prefix:
-        for key, value in glam_dict.items():
-            if not key.startswith(diag_prefix): continue
-            
-            # Protect diagonals too
-            remainder = key[len(diag_prefix):]
-            if "L" in remainder or "Decay" in remainder: 
-                continue
+    pair_keys, diag_keys = cached
+    for a, b, k1, k2 in pair_keys:
+        if k1 in glam_dict:
+            matrix[a, b] = glam_dict[k1]
+        elif k2 in glam_dict:
+            matrix[a, b] = glam_dict[k2]
 
-            try:
-                parts = key.split('_')
-                idx = int(parts[-1])
-                if 0 <= idx < num_levels:
-                    matrix[idx, idx] = value
-            except (IndexError, ValueError): continue
-            
+    for i, k1, k2 in diag_keys:
+        if k1 in glam_dict:
+            matrix[i, i] = glam_dict[k1]
+        elif k2 in glam_dict:
+            matrix[i, i] = glam_dict[k2]
+
     return matrix
+
 
 def save_matrix(matrix, prefix, output_folder, file_suffix, index=None, columns=None):
     """

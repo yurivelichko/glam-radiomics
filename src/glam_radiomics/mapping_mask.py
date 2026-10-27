@@ -1,4 +1,4 @@
-"""Independent mapping ROI for GLAM; global analysis and normalization unchanged."""
+"""Independent mapping ROI and shared FixedCount normalization reference helpers for GLAM."""
 from pathlib import Path
 import json
 import re
@@ -38,7 +38,6 @@ def select_mask(array, labels):
 
 
 def find_mapping_mask(prefix, paths, identifiers):
-    # Exact scan prefix + suffix, never the first arbitrary brain file in a folder.
     folders = {Path(p).resolve().parent for p in paths.get('images',{}).values()}
     if paths.get('mask'):
         folders.add(Path(paths['mask']).resolve().parent)
@@ -59,6 +58,36 @@ def check_geometry(image, mask, description):
             raise ValueError(f'{description}: {attr} mismatch; register/resample the mask explicitly')
 
 
+def load_normalization_mask(paths, multilabel_mask_sitk=None):
+    """Unified normalization reference mask loader used identically by both
+    global analysis (`run.py`) and 3D mapping (`mapping_mask.py`).
+    If a `norm_mask` path is supplied, any read error fails explicitly without
+    silently falling back to the analysis mask.
+    """
+    import SimpleITK as sitk
+    from .utils import generate_binary_mask
+    if paths.get('norm_mask'):
+        return sitk.ReadImage(paths['norm_mask'])
+    if multilabel_mask_sitk is None:
+        multilabel_mask_sitk = sitk.ReadImage(paths['mask'])
+    return generate_binary_mask(multilabel_mask_sitk, 99)
+
+
+def compute_sequence_norm_bounds(image_sitk, norm_mask_sitk):
+    """Unified FixedCount normalization bound calculation and validation used
+    identically by global analysis (`run.py`) and 3D mapping (`mapping_mask.py`).
+    Fails explicitly on geometry mismatch or empty/nonfinite reference intensities.
+    """
+    import SimpleITK as sitk
+    from .config import get_fixed_count_bounds
+    check_geometry(image_sitk, norm_mask_sitk, 'Normalization mask')
+    array = sitk.GetArrayFromImage(image_sitk)
+    values = array[sitk.GetArrayFromImage(norm_mask_sitk) > 0]
+    if not values.size or not np.isfinite(values).all():
+        raise ValueError('Empty/nonfinite normalization reference intensities')
+    return tuple(get_fixed_count_bounds(values))
+
+
 def quantize_mapping(image, mask, method, levels, bounds=None, q_min=None, q_max=None, bin_width=None):
     """Quantize the mapping domain itself, not the analysis crop."""
     image = np.asarray(image,dtype=np.float64)
@@ -73,7 +102,8 @@ def quantize_mapping(image, mask, method, levels, bounds=None, q_min=None, q_max
     method = method.lower()
     if method == 'fixedcount':
         if bounds is None:
-            lo,hi = np.percentile(values,[1,99])
+            from .config import get_fixed_count_bounds
+            lo, hi = get_fixed_count_bounds(values)
         else:
             lo,hi = bounds
         if not np.isfinite([lo,hi]).all() or hi < lo:
@@ -114,24 +144,11 @@ def generate_scan_maps(prefix, paths, output_dir, config_path, labels_to_process
         print('  - MappingMaskMode=Analysis: explicitly using analysis label masks')
     method = get_config('QuantizationMethod').lower()
     levels = get_config('NumGrayLevels')
-    # Use the same normalization reference policy as analysis, independently of
-    # the mapping ROI. A supplied invalid normalization mask fails explicitly.
-    norm = None
-    if method == 'fixedcount':
-        if paths.get('norm_mask'):
-            norm = sitk.ReadImage(paths['norm_mask'])
-        else:
-            norm = generate_binary_mask(sitk.ReadImage(paths['mask']),99)
+    norm = load_normalization_mask(paths) if method == 'fixedcount' else None
     for seq,image_path in paths.get('images',{}).items():
         image = sitk.ReadImage(image_path,sitk.sitkFloat32)
         array = sitk.GetArrayFromImage(image)
-        bounds = None
-        if norm is not None:
-            check_geometry(image,norm,'Normalization mask')
-            values = array[sitk.GetArrayFromImage(norm)>0]
-            if not values.size or not np.isfinite(values).all():
-                raise ValueError('Empty/nonfinite normalization reference for mapping')
-            bounds = tuple(np.percentile(values,[1,99]))
+        bounds = compute_sequence_norm_bounds(image, norm) if norm is not None else None
         for name,roi in rois:
             check_geometry(image,roi,'Mapping mask')
             roi_array = sitk.GetArrayFromImage(roi)
@@ -144,7 +161,6 @@ def generate_scan_maps(prefix, paths, output_dir, config_path, labels_to_process
                 get_config('BinWidth') if method=='fixedwidth' else None)
             map_prefix = f'{prefix}_{name}_{seq}'
             print(f'  --- Independent mapping: {map_prefix} ---')
-            # Preserve parent RNG state so mapping cannot alter later global features.
             state = np.random.get_state()
             try:
                 mapping.generate_feature_maps(image,roi,quantized,levels,map_prefix,output_dir,config_path)
