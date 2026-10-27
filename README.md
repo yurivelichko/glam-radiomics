@@ -58,7 +58,12 @@ MaxRdfRadius = 100
 AnisotropyCutoffRadius = 5
 MaxLocalShellRadius = 30
 NumRandomisations = 4
-RdfSamplePoints = 1000
+RdfSamplePoints = 2000
+
+RdfMinSupportedReferences = 20
+RdfMinSupportedFraction = 0.01
+RdfMinMedianShellVoxels = 20.0
+RdfMinShellVolumeFraction = 0.05
 
 # QuantizationMethod can be "FixedCount" (for MRI) or "FixedWidth" (for CT)
 QuantizationMethod = FixedCount
