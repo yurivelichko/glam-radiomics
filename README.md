@@ -17,13 +17,14 @@ If you use the GLAM framework in your research, please cite our paper:
 
 You can install GLAM-radiomics using the following command:
 ```Plaintext
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ glam-radiomics
+pip install glam-radiomics
 ```
 or
 ```Plaintext
-pip install glam-radiomics
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ glam-radiomics
 ```
-Note: This release (v1.6.4) was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
+
+Note: This release was successfully built and tested using Python 3.12.10 and NumPy 2.3.2.
 
 GPU Acceleration (Optional but Recommended): > GLAM features automatic GPU-accelerated matrix batching for massive speed improvements. To enable this, you must install CuPy. It is highly recommended to install the pre-compiled binary wheel that matches your system's NVIDIA CUDA version (e.g., pip install cupy-cuda12x) rather than running pip install cupy, which requires a complex C++ build environment and can cause installation failures.
 
